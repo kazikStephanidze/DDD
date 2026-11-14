@@ -1,0 +1,8 @@
+{
+  "name": "003 рemix Дядя Деп",
+  "description": "Интерактивный Telegram-бот с философско-лудными фразами, играми и ежедневным гороскопом для развлечения пользователей.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
