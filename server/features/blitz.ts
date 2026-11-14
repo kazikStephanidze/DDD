@@ -5,20 +5,20 @@ import {
   displayName,
   playerLabel,
   shortId
-} from '../engineShared';
+} from '../engineShared.js';
 import {
   ChatState,
   PlayerState,
   addBotLog,
   getDb,
   scheduleSave
-} from '../storage';
-import { unlockAchievement } from './profileQuests';
+} from '../storage.js';
+import { unlockAchievement } from './profileQuests.js';
 import {
   markRuntimeDirty,
   registerRuntimeAdapter,
   resolveRuntimeTransport
-} from '../runtimeRegistry';
+} from '../runtimeRegistry.js';
 
 interface BlitzQuestionTemplate {
   question: string;

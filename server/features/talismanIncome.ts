@@ -4,16 +4,16 @@ import {
   getActiveLoansForBorrower,
   getRemainingDebt,
   isLoanOverdue
-} from '../engineShared';
-import { ChatState, PlayerState, addBotLog, scheduleSave } from '../storage';
+} from '../engineShared.js';
+import { ChatState, PlayerState, addBotLog, scheduleSave } from '../storage.js';
 import {
   TALISMAN_BY_ID,
   TALISMAN_INCOME_MIN_CLAIM,
   TALISMAN_INCOME_PER_HOUR,
   TALISMAN_PASSIVE_CAP_HOURS,
   TALISMAN_PASSIVE_TOP_SLOTS
-} from '../talismans';
-import { unlockAchievement } from './profileQuests';
+} from '../talismans.js';
+import { unlockAchievement } from './profileQuests.js';
 
 export interface TalismanIncomeSnapshot {
   hourlyRate: number;

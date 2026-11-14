@@ -7,7 +7,7 @@ import {
   getGhostRemainingMs,
   playerLabel,
   shortId
-} from '../engineShared';
+} from '../engineShared.js';
 import {
   ChatState,
   OwnedTalisman,
@@ -15,16 +15,16 @@ import {
   addBotLog,
   getDb,
   scheduleSave
-} from '../storage';
-import { RARITY_META, TALISMAN_BY_ID } from '../talismans';
-import { unlockAchievement } from './profileQuests';
-import { syncTalismanPassiveIncome } from './talismanIncome';
+} from '../storage.js';
+import { RARITY_META, TALISMAN_BY_ID } from '../talismans.js';
+import { unlockAchievement } from './profileQuests.js';
+import { syncTalismanPassiveIncome } from './talismanIncome.js';
 import {
   isServerlessRuntime,
   markRuntimeDirty,
   registerRuntimeAdapter,
   resolveRuntimeTransport
-} from '../runtimeRegistry';
+} from '../runtimeRegistry.js';
 
 const AUCTION_DURATION_MS = 60_000;
 const AUCTION_MAX_DURATION_MS = 120_000;

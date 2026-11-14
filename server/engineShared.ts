@@ -10,10 +10,10 @@ import {
   getZonedDateTimeParts,
   recordUsedPhraseKey,
   scheduleSave
-} from './storage';
-import { PhraseCategory, pickNonRepeatingPhrase } from './phrases';
-import { TALISMAN_BY_ID } from './talismans';
-import { markRuntimeDirty, registerRuntimeAdapter } from './runtimeRegistry';
+} from './storage.js';
+import { PhraseCategory, pickNonRepeatingPhrase } from './phrases.js';
+import { TALISMAN_BY_ID } from './talismans.js';
+import { markRuntimeDirty, registerRuntimeAdapter } from './runtimeRegistry.js';
 
 export interface InlineButton {
   text: string;

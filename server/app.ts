@@ -12,17 +12,17 @@ import {
   sendDailyHoroscopeBroadcast,
   sendDailyLeaderboardBroadcast,
   sweepExpiredLobbies
-} from './botEngine';
-import { sendDailyLotteryDrawBroadcast } from './features/lottery';
-import { sendChatBlitzBroadcast } from './features/blitz';
-import { PHRASE_POOLS, getPhraseCatalogStats, pickRandom } from './phrases';
+} from './botEngine.js';
+import { sendDailyLotteryDrawBroadcast } from './features/lottery.js';
+import { sendChatBlitzBroadcast } from './features/blitz.js';
+import { PHRASE_POOLS, getPhraseCatalogStats, pickRandom } from './phrases.js';
 import {
   isRuntimeDirty,
   isServerlessRuntime,
   markRuntimeDirty,
   registerRuntimeAdapter,
   registerTransportResolver
-} from './runtimeRegistry';
+} from './runtimeRegistry.js';
 import {
   BOT_MESSAGE_TTL_MS,
   ensureDatabaseLoaded,
@@ -33,9 +33,10 @@ import {
   getOrCreateChat,
   getZonedDateTimeParts,
   scheduleSave,
+  setLocalPollingPaused,
   setTelegramToken,
   setTimezone
-} from './storage';
+} from './storage.js';
 import {
   getActiveTelegramTransport,
   getTelegramStatus,
@@ -43,8 +44,9 @@ import {
   refreshServerlessTelegramStatus,
   runScheduledTasksNow,
   setupTelegramWebhook,
-  startTelegramBot
-} from './telegramBot';
+  startTelegramBot,
+  stopTelegramBot
+} from './telegramBot.js';
 
 export interface SimMessage {
   id: string;
@@ -303,6 +305,7 @@ export function createExpressApp(): express.Express {
             ? await setupTelegramWebhook(webhookUrl, cleanToken)
             : await refreshServerlessTelegramStatus();
         } else {
+          setLocalPollingPaused(false);
           tg = await startTelegramBot(cleanToken);
         }
         await flushDatabaseToFirebase();
@@ -329,12 +332,30 @@ export function createExpressApp(): express.Express {
           ? await setupTelegramWebhook(webhookUrl)
           : await refreshServerlessTelegramStatus();
       } else {
+        setLocalPollingPaused(false);
         tg = await startTelegramBot();
       }
       await flushDatabaseToFirebase();
       res.json({ ok: true, telegram: tg });
     } catch (err: any) {
       res.status(500).json({ ok: false, error: err?.message || 'Restart failed' });
+    }
+  });
+
+  app.post('/api/bot/stop', async (_req, res) => {
+    try {
+      await ensureDatabaseLoaded({ forceRemote: true });
+      if (!isServerlessRuntime()) {
+        setLocalPollingPaused(true);
+        await stopTelegramBot();
+        await flushDatabaseToFirebase();
+      }
+      const tg = isServerlessRuntime()
+        ? await refreshServerlessTelegramStatus()
+        : getTelegramStatus();
+      res.json({ ok: true, telegram: tg });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err?.message || 'Stop failed' });
     }
   });
 

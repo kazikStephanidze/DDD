@@ -10,7 +10,7 @@ import {
   nextPhrase,
   playerLabel,
   shortId
-} from '../engineShared';
+} from '../engineShared.js';
 import {
   ChatState,
   LOBBY_IDLE_TTL_MS,
@@ -18,13 +18,13 @@ import {
   addBotLog,
   getDb,
   scheduleSave
-} from '../storage';
-import { recordGameOutcome } from '../features/profileQuests';
+} from '../storage.js';
+import { recordGameOutcome } from '../features/profileQuests.js';
 import {
   markRuntimeDirty,
   registerRuntimeAdapter,
   resolveRuntimeTransport
-} from '../runtimeRegistry';
+} from '../runtimeRegistry.js';
 
 interface BjCard {
   rank: string;

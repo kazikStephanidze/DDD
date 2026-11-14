@@ -8,7 +8,7 @@ import {
   getTodayDateStr,
   nextPhrase,
   playerLabel
-} from '../engineShared';
+} from '../engineShared.js';
 import {
   ChatState,
   LOTTERY_TICKET_PRICE,
@@ -17,8 +17,8 @@ import {
   addBotLog,
   getDb,
   scheduleSave
-} from '../storage';
-import { recordQuestProgress, unlockAchievement } from './profileQuests';
+} from '../storage.js';
+import { recordQuestProgress, unlockAchievement } from './profileQuests.js';
 
 function ensureTodayLottery(chat: ChatState, today = getTodayDateStr()) {
   if (!chat.lottery || chat.lottery.date !== today) {

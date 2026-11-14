@@ -7,15 +7,15 @@ import {
   createExpressApp,
   runSimulatorScheduledBroadcast,
   seedSimulatorWelcomeIfEmpty
-} from './server/app';
+} from './server/app.js';
 import {
   addBotLog,
   ensureDatabaseLoaded,
   flushDatabaseToFirebase,
   getDb,
   loadDatabase
-} from './server/storage';
-import { startDailyScheduler, startTelegramBot } from './server/telegramBot';
+} from './server/storage.js';
+import { startDailyScheduler, startTelegramBot } from './server/telegramBot.js';
 
 async function bootstrap() {
   loadDatabase();
@@ -56,8 +56,18 @@ async function bootstrap() {
       detail: `Порт ${PORT}, часовой пояс ${getDb().timezone}`
     });
 
-    // Launch live Telegram bot immediately on startup (polling locally)
-    await startTelegramBot();
+    // Launch live Telegram bot on startup unless local polling was manually paused
+    if (!getDb().localPollingPaused) {
+      await startTelegramBot();
+    } else {
+      addBotLog({
+        source: 'telegram',
+        chatId: 'system',
+        chatTitle: 'Telegram Polling',
+        event: 'Polling на паузе',
+        detail: 'Автозапуск локального бота отключён (удобно для теста Webhook на Vercel)'
+      });
+    }
 
     // Launch 12:00 / 12:01 / 20:55 / 21:00 scheduler & 5-minute auto-delete cleanup
     startDailyScheduler(runSimulatorScheduledBroadcast);

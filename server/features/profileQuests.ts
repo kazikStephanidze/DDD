@@ -10,7 +10,7 @@ import {
   nextPhrase,
   playerLabel,
   shortId
-} from '../engineShared';
+} from '../engineShared.js';
 import {
   ChatState,
   DAILY_QUEST_REWARD_COINS,
@@ -22,7 +22,7 @@ import {
   PlayerState,
   addBotLog,
   scheduleSave
-} from '../storage';
+} from '../storage.js';
 import {
   CASE_BY_ID,
   RARITY_META,
@@ -31,12 +31,12 @@ import {
   UNIQUE_TALISMANS,
   getTalismansByRarity,
   rollRarityForCase
-} from '../talismans';
+} from '../talismans.js';
 import {
   formatHourlyRate,
   getTalismanIncomeSnapshot,
   syncTalismanPassiveIncome
-} from './talismanIncome';
+} from './talismanIncome.js';
 
 export interface AchievementDef {
   id: string;

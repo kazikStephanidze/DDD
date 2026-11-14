@@ -10,9 +10,9 @@ import {
   sendDailyHoroscopeBroadcast,
   sendDailyLeaderboardBroadcast,
   sweepExpiredLobbies
-} from './botEngine';
-import { sendDailyLotteryDrawBroadcast } from './features/lottery';
-import { hasActiveBlitzForChat, sendChatBlitzBroadcast } from './features/blitz';
+} from './botEngine.js';
+import { sendDailyLotteryDrawBroadcast } from './features/lottery.js';
+import { hasActiveBlitzForChat, sendChatBlitzBroadcast } from './features/blitz.js';
 import {
   BLITZ_INTERVAL_MS,
   BLITZ_WINDOW_END_HOUR,
@@ -25,11 +25,11 @@ import {
   scheduleSave,
   trackBotMessage,
   untrackBotMessage
-} from './storage';
+} from './storage.js';
 
 import {
   isServerlessRuntime
-} from './runtimeRegistry';
+} from './runtimeRegistry.js';
 
 export interface TelegramBotStatus {
   running: boolean;

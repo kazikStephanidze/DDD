@@ -1,4 +1,4 @@
-import { TalismanRarity } from './storage';
+import { TalismanRarity } from './storage.js';
 
 export interface TalismanDef {
   id: string;

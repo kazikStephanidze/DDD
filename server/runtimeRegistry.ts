@@ -1,4 +1,4 @@
-import type { BotTransport } from './engineShared';
+import type { BotTransport } from './engineShared.js';
 
 export interface RuntimeAdapter {
   exportState: () => unknown;

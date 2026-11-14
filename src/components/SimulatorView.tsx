@@ -19,6 +19,7 @@ interface SimulatorViewProps {
   onClearChat: () => Promise<void>;
   onUpdateConfig: (token: string, timezone: string) => Promise<void>;
   onRestartBot: () => Promise<void>;
+  onStopBot: () => Promise<void>;
   onSetupWebhook: (webhookUrl?: string) => Promise<{ ok: boolean; error?: string; webhookUrl?: string }>;
 }
 
@@ -44,6 +45,7 @@ export function SimulatorView({
   onClearChat,
   onUpdateConfig,
   onRestartBot,
+  onStopBot,
   onSetupWebhook,
   firebase
 }: SimulatorViewProps) {
@@ -461,6 +463,26 @@ export function SimulatorView({
                 <RefreshCw className="w-3.5 h-3.5" />
                 <span>Рестарт</span>
               </button>
+              {telegram.mode !== 'webhook' && telegram.running && (
+                <button
+                  type="button"
+                  disabled={busyAction}
+                  onClick={async () => {
+                    setBusyAction(true);
+                    setWebhookNote(null);
+                    try {
+                      await onStopBot();
+                      setWebhookNote('Локальный polling остановлен — можно проверять Webhook на Vercel.');
+                    } finally {
+                      setBusyAction(false);
+                    }
+                  }}
+                  className="w-full px-3 py-2 text-xs font-medium bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+                  title="Остановить локального бота в AI Studio, чтобы не перехватывал Webhook у Vercel"
+                >
+                  Пауза Polling (для теста Vercel)
+                </button>
+              )}
               <button
                 type="button"
                 disabled={busyAction}

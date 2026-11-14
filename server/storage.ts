@@ -1,13 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { isFirebaseConfigured, rtdbGet, rtdbPatch } from './firebaseDb';
+import { isFirebaseConfigured, rtdbGet, rtdbPatch } from './firebaseDb.js';
 import {
   applyRuntimeSnapshot,
   clearRuntimeDirty,
   collectRuntimeSnapshot,
   isRuntimeDirty,
   isServerlessRuntime
-} from './runtimeRegistry';
+} from './runtimeRegistry.js';
 
 export type GameType =
   | 'roulette'
@@ -207,6 +207,7 @@ export interface DatabaseSchema {
   chats: Record<string, ChatState>;
   timezone: string;
   telegramToken?: string;
+  localPollingPaused?: boolean;
   trackedBotMessages?: TrackedBotMessage[];
 }
 
@@ -254,6 +255,7 @@ interface FirebaseStoredState {
   meta?: {
     timezone?: string;
     telegramToken?: string;
+    localPollingPaused?: boolean;
     trackedBotMessages?: TrackedBotMessage[];
   };
   chats?: Record<string, ChatState>;
@@ -311,6 +313,7 @@ function computeHashes(): { meta: string; chats: string; logs: string; runtime: 
   const metaObj = {
     timezone: db.timezone,
     telegramToken: db.telegramToken || null,
+    localPollingPaused: Boolean(db.localPollingPaused),
     trackedBotMessages: db.trackedBotMessages || []
   };
   return {
@@ -341,6 +344,7 @@ export function loadDatabase(): DatabaseSchema {
           chats: parsed.chats || {},
           timezone: parsed.timezone || process.env.BOT_TIMEZONE || 'Europe/Minsk',
           telegramToken: envToken || parsed.telegramToken,
+          localPollingPaused: Boolean(parsed.localPollingPaused),
           trackedBotMessages: parsed.trackedBotMessages || []
         };
       } catch (err) {
@@ -394,6 +398,7 @@ export async function ensureDatabaseLoaded(options?: {
         chats: remote.chats || {},
         timezone: remote.meta?.timezone || process.env.BOT_TIMEZONE || 'Europe/Minsk',
         telegramToken: envToken || remote.meta?.telegramToken || db.telegramToken,
+        localPollingPaused: Boolean(remote.meta?.localPollingPaused),
         trackedBotMessages: remote.meta?.trackedBotMessages || []
       };
       normalizeDbSchema(db);
@@ -437,6 +442,7 @@ export async function flushDatabaseToFirebase(force = false): Promise<void> {
     patch.meta = {
       timezone: db.timezone,
       telegramToken: db.telegramToken || null,
+      localPollingPaused: Boolean(db.localPollingPaused),
       trackedBotMessages: db.trackedBotMessages || []
     };
   }
@@ -614,6 +620,11 @@ export function setTimezone(tz: string) {
 
 export function setTelegramToken(token: string) {
   db.telegramToken = token;
+  saveDatabaseImmediate();
+}
+
+export function setLocalPollingPaused(paused: boolean) {
+  db.localPollingPaused = paused;
   saveDatabaseImmediate();
 }
 

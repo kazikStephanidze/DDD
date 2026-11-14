@@ -167,6 +167,11 @@ export default function App() {
     await fetchStatus();
   };
 
+  const handleStopBot = async () => {
+    await fetch('/api/bot/stop', { method: 'POST' });
+    await fetchStatus();
+  };
+
   const handleSetupWebhook = async (webhookUrl?: string) => {
     const res = await fetch('/api/bot/webhook/setup', {
       method: 'POST',
@@ -351,6 +356,7 @@ export default function App() {
             onClearChat={handleClearChat}
             onUpdateConfig={handleUpdateConfig}
             onRestartBot={handleRestartBot}
+            onStopBot={handleStopBot}
             onSetupWebhook={handleSetupWebhook}
           />
         )}

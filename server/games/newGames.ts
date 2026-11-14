@@ -13,12 +13,12 @@ import {
   playerLabel,
   shortId,
   sleep
-} from '../engineShared';
+} from '../engineShared.js';
 import {
   recordGameOutcome,
   recordQuestProgress,
   unlockAchievement
-} from '../features/profileQuests';
+} from '../features/profileQuests.js';
 import {
   ChatState,
   LOBBY_IDLE_TTL_MS,
@@ -26,13 +26,13 @@ import {
   addBotLog,
   getDb,
   scheduleSave
-} from '../storage';
+} from '../storage.js';
 import {
   isServerlessRuntime,
   markRuntimeDirty,
   registerRuntimeAdapter,
   resolveRuntimeTransport
-} from '../runtimeRegistry';
+} from '../runtimeRegistry.js';
 
 // =====================================
 // 1. MULTIPLAYER CRASH ("ОБЩИЙ КРАШ ЧАТА")

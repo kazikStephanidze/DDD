@@ -25,18 +25,18 @@ import {
   getZonedDateTimeParts,
   scheduleSave,
   trackBotMessage
-} from './storage';
+} from './storage.js';
 import {
   isServerlessRuntime,
   markRuntimeDirty,
   registerRuntimeAdapter,
   resolveRuntimeTransport
-} from './runtimeRegistry';
+} from './runtimeRegistry.js';
 import {
   PhraseCategory,
   findChatTriggerMatch,
   pickNonRepeatingPhrase
-} from './phrases';
+} from './phrases.js';
 import {
   CASE_BY_ID,
   CASE_CATALOG,
@@ -51,7 +51,7 @@ import {
   getTalismanPotWeight,
   getTalismansByRarity,
   rollRarityForCase
-} from './talismans';
+} from './talismans.js';
 import {
   BotTransport,
   GAME_RULES_SHORT,
@@ -81,7 +81,7 @@ import {
   setPlayerActiveMenuMsgId,
   shortId,
   sleep
-} from './engineShared';
+} from './engineShared.js';
 import {
   buildProfileView,
   handleDailyQuestsCallback,
@@ -89,8 +89,8 @@ import {
   recordGameOutcome,
   recordQuestProgress,
   unlockAchievement
-} from './features/profileQuests';
-import { handleLotteryCallback } from './features/lottery';
+} from './features/profileQuests.js';
+import { handleLotteryCallback } from './features/lottery.js';
 import {
   handleCrashCallback,
   handleDicePokerCallback,
@@ -104,29 +104,29 @@ import {
   startRpsMenu,
   startThimblesGame,
   sweepExpiredNewGames
-} from './games/newGames';
+} from './games/newGames.js';
 import {
   handleAuctionCallback,
   isAuctionProtectedMsg,
   sweepExpiredAuctions
-} from './features/auction';
+} from './features/auction.js';
 import {
   handleMultiBlackjackCallback,
   isMultiBlackjackProtectedMsg,
   startMultiBlackjackLobby,
   sweepExpiredMultiBlackjack
-} from './games/multiBlackjack';
+} from './games/multiBlackjack.js';
 import {
   handleBlitzCallback,
   isBlitzProtectedMsg,
   sweepExpiredBlitzes
-} from './features/blitz';
+} from './features/blitz.js';
 import {
   claimTalismanPassiveIncome,
   formatHourlyRate,
   getTalismanIncomeSnapshot,
   syncTalismanPassiveIncome
-} from './features/talismanIncome';
+} from './features/talismanIncome.js';
 
 export type {
   BotTransport,
