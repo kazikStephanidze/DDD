@@ -122,6 +122,18 @@ import {
   sweepExpiredBlitzes
 } from './features/blitz.js';
 import {
+  handleBattleshipCallback,
+  handleBlindAuctionCallback,
+  handleChickenCallback,
+  handleLiarsDiceCallback,
+  isPartyGamesProtectedMsg,
+  startBattleshipMenu,
+  startBlindAuction,
+  startChickenDuel,
+  startLiarsDiceLobby,
+  sweepExpiredPartyGames
+} from './games/partyGames.js';
+import {
   claimTalismanPassiveIncome,
   formatHourlyRate,
   getTalismanIncomeSnapshot,
@@ -338,6 +350,7 @@ function scheduleCleanupMessage(
 
 export function isProtectedInteractiveMessage(msgId: string): boolean {
   if (isNewGamesProtectedMsg(msgId)) return true;
+  if (isPartyGamesProtectedMsg(msgId)) return true;
   if (isAuctionProtectedMsg(msgId)) return true;
   if (isMultiBlackjackProtectedMsg(msgId)) return true;
   if (isBlitzProtectedMsg(msgId)) return true;
@@ -494,6 +507,7 @@ export async function sweepExpiredLobbies(): Promise<void> {
   for (const [id, s] of ladderSessions.entries()) if (now - s.createdAt >= SOLO_TTL) ladderSessions.delete(id);
 
   await sweepExpiredNewGames(now);
+  await sweepExpiredPartyGames(now);
   await sweepExpiredAuctions(now);
   await sweepExpiredMultiBlackjack(now);
   await sweepExpiredBlitzes(now);
@@ -579,7 +593,7 @@ const GAME_GENRE_META: Record<GameGenre, { short: string; title: string; subtitl
   pvp: {
     short: '⚔️ С чатом',
     title: '⚔️ Мультиплеер и PvP в чате',
-    subtitle: 'Общий Краш, Русская рулетка, Бега, Стол 21 (2–4), Дуэль 1×1 и К-Н-Б PvP.'
+    subtitle: 'Краш, Рулетка, Бега, Стол 21, Дуэль, К-Н-Б, Морской бой, Курица, Тёмный аукцион и Верю — Не верю.'
   },
   skill: {
     short: '🧠 Тактика',
@@ -721,6 +735,14 @@ export function buildMainMenuKeyboard(
         [
           { text: '🪙 Дуэль 1×1 (PvP)', callbackData: 'g:duel' },
           { text: '🪨✂️📄 К-Н-Б (PvP)', callbackData: 'g:rps' }
+        ],
+        [
+          { text: '⚓ Морской бой', callbackData: 'g:battleship' },
+          { text: '🐔 Курица 1×1', callbackData: 'g:chicken' }
+        ],
+        [
+          { text: '🎁 Тёмный аукцион', callbackData: 'g:blindauc' },
+          { text: '🎲 Верю — Не верю', callbackData: 'g:liarsdice' }
         ],
         [{ text: '↩️ Главное меню', callbackData: 'menu:home' }]
       ];
@@ -1254,6 +1276,8 @@ function isSharedOrMultiAction(parts: string[]): boolean {
   const action = parts[0];
   const sub = parts[1];
   if (action === 'cr' || action === 'rr' || action === 'bjt' || action === 'blz') return true;
+  if (action === 'chk' || action === 'bau' || action === 'ldc') return true;
+  if (action === 'bs') return sub === 'join' || sub === 'fire' || sub === 'peek' || sub === 'cancel';
   if (action === 'rc') return sub !== 'new';
   if (action === 'dl') return sub !== 'new';
   if (action === 'rps') return sub === 'pvpjoin' || sub === 'pmove' || sub === 'cancel';
@@ -2281,6 +2305,30 @@ export async function handleCallback(
     return;
   }
 
+  // Battleship ("Морской бой 4x4")
+  if (action === 'bs') {
+    await handleBattleshipCallback(transport, chat, player, callbackId, messageId, parts);
+    return;
+  }
+
+  // Chicken Duel ("Курица / Трусишка")
+  if (action === 'chk') {
+    await handleChickenCallback(transport, chat, player, callbackId, messageId, parts);
+    return;
+  }
+
+  // Blind Auction ("Тёмный аукцион")
+  if (action === 'bau') {
+    await handleBlindAuctionCallback(transport, chat, player, callbackId, messageId, parts);
+    return;
+  }
+
+  // Liar's Dice ("Верю — Не верю")
+  if (action === 'ldc') {
+    await handleLiarsDiceCallback(transport, chat, player, callbackId, messageId, parts);
+    return;
+  }
+
   await transport.answerCallback(callbackId);
 }
 
@@ -2351,6 +2399,26 @@ async function startGameFlow(
 
   if (game === 'bjtable') {
     await startMultiBlackjackLobby(transport, chat, player, stake, isLastDodep, messageId);
+    return;
+  }
+
+  if (game === 'battleship') {
+    await startBattleshipMenu(transport, chat, player, stake, isLastDodep, messageId);
+    return;
+  }
+
+  if (game === 'chicken') {
+    await startChickenDuel(transport, chat, player, stake, isLastDodep, messageId);
+    return;
+  }
+
+  if (game === 'blindauc') {
+    await startBlindAuction(transport, chat, player, stake, messageId);
+    return;
+  }
+
+  if (game === 'liarsdice') {
+    await startLiarsDiceLobby(transport, chat, player, stake, isLastDodep, messageId);
     return;
   }
 

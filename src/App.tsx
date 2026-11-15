@@ -40,6 +40,12 @@ export default function App() {
     }
   }, []);
 
+  const hasLiveGameInFeed = messages.slice(-6).some((m) =>
+    /ПОСАДКА НА БОРТ|В ПОЛЁТЕ!|ТЁМНЫЙ АУКЦИОН|РАУНД \d\/6|ОЖИДАНИЕ СОПЕРНИКА|МОРСКОЙ БОЙ|ВЕРЮ — НЕ ВЕРЮ|ЗАБЕГ/i.test(
+      m.text
+    )
+  );
+
   useEffect(() => {
     let statusTimer: ReturnType<typeof setInterval> | null = null;
     let simTimer: ReturnType<typeof setInterval> | null = null;
@@ -51,7 +57,7 @@ export default function App() {
 
       statusTimer = setInterval(fetchStatus, 10000);
       if (activeTab === 'simulator') {
-        simTimer = setInterval(fetchSimMessages, 4000);
+        simTimer = setInterval(fetchSimMessages, hasLiveGameInFeed ? 1100 : 4000);
       }
     };
 
@@ -80,7 +86,7 @@ export default function App() {
       if (statusTimer) clearInterval(statusTimer);
       if (simTimer) clearInterval(simTimer);
     };
-  }, [activeTab, fetchStatus, fetchSimMessages]);
+  }, [activeTab, fetchStatus, fetchSimMessages, hasLiveGameInFeed]);
 
   const handleSendCommand = async (command: string) => {
     const res = await fetch('/api/sim/command', {

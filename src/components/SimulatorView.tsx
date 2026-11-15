@@ -158,10 +158,10 @@ export function SimulatorView({
         >
           {messages.map((msg) => {
             const isBot = msg.sender === 'bot';
-            const isMinesGrid =
+            const isSquareGrid =
               msg.keyboard &&
-              msg.keyboard.length >= 5 &&
-              msg.keyboard[0]?.length === 5;
+              msg.keyboard.length >= 4 &&
+              (msg.keyboard[0]?.length === 5 || msg.keyboard[0]?.length === 4);
 
             return (
               <div
@@ -192,7 +192,7 @@ export function SimulatorView({
                 {isBot && msg.keyboard && msg.keyboard.length > 0 && (
                   <div
                     className={`mt-1.5 flex flex-col gap-1.5 ${
-                      isMinesGrid ? 'w-[280px]' : 'w-full max-w-[90%] md:max-w-[82%]'
+                      isSquareGrid ? 'w-[280px]' : 'w-full max-w-[90%] md:max-w-[82%]'
                     }`}
                   >
                     {msg.keyboard.map((row, rIdx) => (

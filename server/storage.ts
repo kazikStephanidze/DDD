@@ -26,7 +26,11 @@ export type GameType =
   | 'rps'
   | 'penalty'
   | 'dicepoker'
-  | 'bjtable';
+  | 'bjtable'
+  | 'battleship'
+  | 'chicken'
+  | 'blindauc'
+  | 'liarsdice';
 
 export type TalismanRarity = 'common' | 'rare' | 'epic' | 'legendary' | 'unique';
 

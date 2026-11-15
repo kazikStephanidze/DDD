@@ -56,6 +56,7 @@ interface CrashRound {
   entries: CrashPassenger[];
   crashPoint: number;
   currentMult: number;
+  boardingTickCount?: number;
   status: 'boarding' | 'running' | 'finished';
   messageId: string | null;
   boardingEndsAt: number;
@@ -86,13 +87,25 @@ export function findActiveCrashRoundForChat(chatId: string): CrashRound | null {
   return null;
 }
 
+function stepCrashMult(mult: number, steps = 1): number {
+  let cur = mult;
+  for (let i = 0; i < steps; i++) {
+    cur = Math.round((cur + 0.12 + cur * 0.13) * 100) / 100;
+  }
+  return cur;
+}
+
 function buildCrashBoardingPayload(chat: ChatState, round: CrashRound): { text: string; keyboard: InlineKeyboard } {
   const leftSec = Math.max(0, Math.ceil((round.boardingEndsAt - Date.now()) / 1000));
   const totalBank = round.entries.reduce((s, e) => s + e.stake, 0);
+  const pulseIcons = ['⏳', '🔥', '🚀'];
+  const pulse = pulseIcons[(round.boardingTickCount || 0) % pulseIcons.length];
+  const filledBars = Math.max(1, Math.min(6, 6 - Math.floor(leftSec / 2)));
+  const bar = '▓'.repeat(filledBars) + '░'.repeat(6 - filledBars);
 
   const lines = [
     `🚀 ОБЩИЙ КРАШ ЧАТА — ПОСАДКА НА БОРТ!`,
-    `⏱ До взлёта: ~${leftSec} сек · Банк на борту: ${totalBank} 🪙`,
+    `${pulse} До взлёта: ~${leftSec} сек [${bar}] · Банк: ${totalBank} 🪙`,
     ``,
     `👨‍🚀 Пассажиры (${round.entries.length}):`
   ];
@@ -143,7 +156,10 @@ function buildCrashFlyingPayload(round: CrashRound): { text: string; keyboard: I
     [{ text: `💰 ЗАБРАТЬ НА x${round.currentMult.toFixed(2)}`, callbackData: `cr:cash:${round.id}` }]
   ];
   if (isServerlessRuntime()) {
-    kb.push([{ text: '📈 Обновить курс (лететь дальше)', callbackData: `cr:tick:${round.id}` }]);
+    kb.push([
+      { text: '📈 Лететь (+1 шаг)', callbackData: `cr:tick:${round.id}` },
+      { text: '⚡ Форсаж (+3 шага)', callbackData: `cr:boost:${round.id}` }
+    ]);
   }
   return { text: lines.join('\n'), keyboard: kb };
 }
@@ -154,7 +170,7 @@ function computeCrashMultAtNow(round: CrashRound, now = Date.now()): number {
   const ticks = Math.max(0, Math.min(80, Math.floor((now - startedAt) / intervalMs)));
   let mult = 1.0;
   for (let i = 0; i < ticks; i++) {
-    mult = Math.round((mult + 0.11 + mult * 0.13) * 100) / 100;
+    mult = stepCrashMult(mult, 1);
     if (mult >= round.crashPoint) return mult;
   }
   return mult;
@@ -174,6 +190,13 @@ async function syncServerlessCrashRound(chat: ChatState, round: CrashRound): Pro
     if (nextMult > round.currentMult) {
       round.currentMult = nextMult;
       markRuntimeDirty();
+      const tr = getNewGameTransport(round.transportSource, chat.chatId, round.transport);
+      if (tr && round.messageId) {
+        const payload = buildCrashFlyingPayload(round);
+        await tr.editMessage(chat.chatId, round.messageId, payload.text, payload.keyboard, {
+          isAnimation: true
+        });
+      }
     }
   }
   return round.status;
@@ -274,6 +297,13 @@ async function launchCrashFlight(chat: ChatState, round: CrashRound): Promise<vo
 
   round.status = 'running';
   round.flightStartedAt = Date.now();
+  if (isServerlessRuntime()) {
+    if (round.crashPoint <= 1.05) {
+      await finishCrashRound(chat, round, true);
+      return;
+    }
+    round.currentMult = round.crashPoint > 1.12 ? 1.12 : 1.05;
+  }
   markRuntimeDirty();
   const tr = getNewGameTransport(round.transportSource, chat.chatId, round.transport);
   const payload = buildCrashFlyingPayload(round);
@@ -291,23 +321,32 @@ async function launchCrashFlight(chat: ChatState, round: CrashRound): Promise<vo
 
   const intervalMs = (tr?.source || round.transportSource) === 'telegram' ? 1450 : 950;
   round.flyTimer = setInterval(async () => {
-    if (round.status !== 'running') {
-      if (round.flyTimer) clearInterval(round.flyTimer);
-      return;
-    }
+    try {
+      if (round.status !== 'running') {
+        if (round.flyTimer) {
+          clearInterval(round.flyTimer);
+          round.flyTimer = null;
+        }
+        return;
+      }
 
-    const nextMult = Math.round((round.currentMult + 0.11 + round.currentMult * 0.13) * 100) / 100;
-    if (nextMult >= round.crashPoint) {
-      await finishCrashRound(chat, round, true);
-      return;
-    }
+      const nextMult = stepCrashMult(round.currentMult, 1);
+      if (nextMult >= round.crashPoint) {
+        await finishCrashRound(chat, round, true);
+        return;
+      }
 
-    round.currentMult = nextMult;
-    const tick = buildCrashFlyingPayload(round);
-    if (round.messageId && tr) {
-      await tr.editMessage(chat.chatId, round.messageId, tick.text, tick.keyboard, {
-        isAnimation: true
-      });
+      round.currentMult = nextMult;
+      markRuntimeDirty();
+      const tick = buildCrashFlyingPayload(round);
+      const activeTr = getNewGameTransport(round.transportSource, chat.chatId, round.transport);
+      if (round.messageId && activeTr) {
+        await activeTr.editMessage(chat.chatId, round.messageId, tick.text, tick.keyboard, {
+          isAnimation: true
+        });
+      }
+    } catch (err: any) {
+      console.error('[Crash] flyTimer error:', err?.message || err);
     }
   }, intervalMs);
 }
@@ -354,6 +393,7 @@ export async function startOrJoinMultiplayerCrash(
       isAllIn,
       status: 'flying'
     });
+    markRuntimeDirty();
     scheduleSave();
 
     const view = buildCrashBoardingPayload(chat, existing);
@@ -396,6 +436,7 @@ export async function startOrJoinMultiplayerCrash(
     ],
     crashPoint,
     currentMult: 1.0,
+    boardingTickCount: 0,
     status: 'boarding',
     messageId: messageId || null,
     boardingEndsAt: Date.now() + boardingWindowMs,
@@ -440,21 +481,45 @@ export async function handleCrashCallback(
     return;
   }
 
-  if (sub === 'tick') {
-    const state = await syncServerlessCrashRound(chat, round);
-    if (state === 'finished') {
-      await transport.answerCallback(callbackId, `💥 Ракета уже взорвалась на x${round.crashPoint.toFixed(2)}!`, true);
+  if (sub === 'tick' || sub === 'boost') {
+    if (round.status === 'boarding') {
+      if (Date.now() >= round.boardingEndsAt) {
+        await transport.answerCallback(callbackId, '🔥 Время вышло — взлетаем!');
+        await launchCrashFlight(chat, round);
+        return;
+      }
+      round.boardingTickCount = (round.boardingTickCount || 0) + 1;
+      markRuntimeDirty();
+      await transport.answerCallback(callbackId, '⏱ Отсчёт обновлён!');
+      const payload = buildCrashBoardingPayload(chat, round);
+      await transport.editMessage(chat.chatId, round.messageId || messageId, payload.text, payload.keyboard);
       return;
     }
-    await transport.answerCallback(
-      callbackId,
-      round.status === 'running' ? `🚀 Текущий курс: x${round.currentMult.toFixed(2)}` : '⏱ Посадка ещё открыта!'
-    );
-    const payload =
-      round.status === 'running'
-        ? buildCrashFlyingPayload(round)
-        : buildCrashBoardingPayload(chat, round);
-    await transport.editMessage(chat.chatId, round.messageId || messageId, payload.text, payload.keyboard);
+
+    if (round.status === 'running') {
+      const steps = sub === 'boost' ? 3 : 1;
+      const timeBasedMult = computeCrashMultAtNow(round);
+      const steppedMult = stepCrashMult(round.currentMult, steps);
+      const nextMult = Math.max(timeBasedMult, steppedMult);
+
+      if (nextMult >= round.crashPoint) {
+        await transport.answerCallback(callbackId, `💥 Ракета взорвалась на x${round.crashPoint.toFixed(2)}!`, true);
+        await finishCrashRound(chat, round, true);
+        return;
+      }
+
+      round.currentMult = nextMult;
+      markRuntimeDirty();
+      await transport.answerCallback(
+        callbackId,
+        sub === 'boost' ? `⚡ Форсаж! Курс x${round.currentMult.toFixed(2)}` : `🚀 Курс вырос: x${round.currentMult.toFixed(2)}`
+      );
+      const payload = buildCrashFlyingPayload(round);
+      await transport.editMessage(chat.chatId, round.messageId || messageId, payload.text, payload.keyboard);
+      return;
+    }
+
+    await transport.answerCallback(callbackId, 'Этот полёт уже завершён.', true);
     return;
   }
 
@@ -496,6 +561,7 @@ export async function handleCrashCallback(
       isAllIn,
       status: 'flying'
     });
+    markRuntimeDirty();
     scheduleSave();
 
     await transport.answerCallback(callbackId, `🚀 Ты на борту со ставкой ${stake} 🪙!`);
@@ -530,6 +596,7 @@ export async function handleCrashCallback(
     if (round.boardingTimer) clearTimeout(round.boardingTimer);
     round.status = 'finished';
     crashRounds.delete(rid);
+    markRuntimeDirty();
 
     for (const e of round.entries) {
       const p = chat.players[e.userId];
@@ -600,6 +667,7 @@ export async function handleCrashCallback(
     });
     if (winMult >= 2.0) recordQuestProgress(player, 'crash_x2', 1);
     if (winMult >= 5.0) unlockAchievement(chat, player, 'astronaut');
+    markRuntimeDirty();
     scheduleSave();
 
     await transport.answerCallback(callbackId, `🪂 Забрал x${winMult.toFixed(2)} (+${payout} 🪙)!`);
