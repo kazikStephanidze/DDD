@@ -5,7 +5,6 @@ import {
   applyRuntimeSnapshot,
   clearRuntimeDirty,
   collectRuntimeEntries,
-  isRuntimeDirty,
   isServerlessRuntime
 } from './runtimeRegistry.js';
 
@@ -516,9 +515,11 @@ export async function ensureDatabaseLoaded(options?: {
           }
           db.chats[targetId] = remoteChat;
           normalizeDbSchema(db, targetId);
+          applyRuntimeSnapshot(remoteRuntime);
         } else if (meta) {
           // Brand-new chat not yet in Firebase; keep existing or create lazily on command
           normalizeDbSchema(db, targetId);
+          applyRuntimeSnapshot(remoteRuntime);
         } else {
           // Completely empty DB in Firebase — seed once
           normalizeDbSchema(db);
@@ -526,9 +527,6 @@ export async function ensureDatabaseLoaded(options?: {
           await flushDatabaseToFirebase(true);
         }
 
-        if (remoteRuntime) {
-          applyRuntimeSnapshot(remoteRuntime);
-        }
         updateSavedHashes({ targetChatId: targetId, markPhraseArchive: wantArchive });
         dbDirty = false;
         clearRuntimeDirty();
@@ -595,9 +593,7 @@ export async function ensureDatabaseLoaded(options?: {
           }
         }
 
-        if (remoteRuntime) {
-          applyRuntimeSnapshot(remoteRuntime);
-        }
+        applyRuntimeSnapshot(remoteRuntime);
         updateSavedHashes({ markPhraseArchive: wantAllArchives });
         dbDirty = false;
         clearRuntimeDirty();
@@ -682,15 +678,14 @@ export async function flushDatabaseToFirebase(force = false, targetChatId?: stri
     patch[`logsArchive/${logKey}`] = entry;
   }
 
-  // Per-adapter runtime delta sync: only patch runtime/{adapterKey} subtrees that changed
+  // Per-adapter runtime delta sync: always compare adapter snapshots (zero network cost)
+  // so any runtime Map mutation is guaranteed to flush to runtime/{adapterKey}
   const pendingRuntimeHashes = new Map<string, string>();
-  if (force || isRuntimeDirty()) {
-    for (const [adapterKey, adapterVal] of collectRuntimeEntries()) {
-      const adapterHash = JSON.stringify(adapterVal);
-      if (force || adapterHash !== lastSavedRuntimeAdapterHashes.get(adapterKey)) {
-        patch[`runtime/${adapterKey}`] = adapterVal;
-        pendingRuntimeHashes.set(adapterKey, adapterHash);
-      }
+  for (const [adapterKey, adapterVal] of collectRuntimeEntries()) {
+    const adapterHash = JSON.stringify(adapterVal);
+    if (force || adapterHash !== lastSavedRuntimeAdapterHashes.get(adapterKey)) {
+      patch[`runtime/${adapterKey}`] = adapterVal;
+      pendingRuntimeHashes.set(adapterKey, adapterHash);
     }
   }
 

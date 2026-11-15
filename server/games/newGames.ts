@@ -737,6 +737,7 @@ export async function startThimblesGame(
     status: 'playing',
     createdAt: Date.now()
   });
+  markRuntimeDirty();
 
   const frameDelay = transport.source === 'telegram' ? 550 : 320;
   const sendOrEdit = async (text: string, kb?: InlineKeyboard): Promise<string | null> => {
@@ -994,6 +995,7 @@ export async function handleRpsCallback(
       status: 'playing',
       createdAt: Date.now()
     });
+    markRuntimeDirty();
 
     await transport.answerCallback(callbackId, 'Выбирай жест!');
     const botText = [
@@ -1448,6 +1450,7 @@ export async function startPenaltyGame(
     createdAt: Date.now()
   };
   penaltySessions.set(sid, session);
+  markRuntimeDirty();
 
   const view = buildPenaltyPayload(chat, player, session);
   if (messageId) {
@@ -1809,6 +1812,7 @@ export async function startDicePokerGame(
     createdAt: Date.now()
   };
   dicePokerSessions.set(sid, session);
+  markRuntimeDirty();
 
   const view = buildDicePokerPayload(chat, player, session);
   if (messageId) {

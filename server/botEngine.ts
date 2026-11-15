@@ -1901,6 +1901,7 @@ export async function handleCallback(
         createdAt: Date.now()
       };
       minesSessions.set(sid, session);
+      markRuntimeDirty();
 
       await transport.answerCallback(callbackId, `Поле ${bombs} мин готово!`);
       await renderMinesBoard(transport, chat, player, session, messageId, 'Выбирай безопасную клетку:');
@@ -2511,6 +2512,7 @@ async function startGameFlow(
       createdAt: Date.now()
     };
     diceSessions.set(sid, session);
+    markRuntimeDirty();
 
     const waitingText = [
       `🎲 КОСТИ ПРОТИВ ДЯДИ ДЕПА`,
@@ -2638,6 +2640,7 @@ async function startGameFlow(
       createdAt: Date.now()
     };
     blackjackSessions.set(sid, session);
+    markRuntimeDirty();
     await renderBlackjackPlaying(transport, player, session, messageId || null);
     return;
   }
@@ -2725,6 +2728,7 @@ async function startGameFlow(
       createdAt: Date.now()
     };
     hiloSessions.set(sid, session);
+    markRuntimeDirty();
     await renderHiloState(transport, chat, player, session, messageId || null, 'Угадай, какая карта выйдет следующей:');
     return;
   }
@@ -6185,6 +6189,7 @@ async function handleLadderCallback(
       createdAt: Date.now()
     };
     ladderSessions.set(sid, session);
+    markRuntimeDirty();
 
     const modeTitle = mode === 'hard' ? '🔴 Хардкор (1/3 дверь)' : '🟢 Лайт (2/3 двери)';
     const text = [
