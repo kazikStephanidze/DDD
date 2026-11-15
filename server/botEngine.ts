@@ -125,11 +125,13 @@ import {
   handleBattleshipCallback,
   handleBlindAuctionCallback,
   handleChickenCallback,
+  handleHotPotatoCallback,
   handleLiarsDiceCallback,
   isPartyGamesProtectedMsg,
   startBattleshipMenu,
   startBlindAuction,
   startChickenDuel,
+  startHotPotatoLobby,
   startLiarsDiceLobby,
   sweepExpiredPartyGames
 } from './games/partyGames.js';
@@ -593,7 +595,7 @@ const GAME_GENRE_META: Record<GameGenre, { short: string; title: string; subtitl
   pvp: {
     short: '⚔️ С чатом',
     title: '⚔️ Мультиплеер и PvP в чате',
-    subtitle: 'Краш, Рулетка, Бега, Стол 21, Дуэль, К-Н-Б, Морской бой, Курица, Тёмный аукцион и Верю — Не верю.'
+    subtitle: 'Краш, Рулетка, Бега, Стол 21, Дуэль, К-Н-Б, Морской бой, Курица, Тёмный аукцион, Верю — Не верю и Горячая картошка.'
   },
   skill: {
     short: '🧠 Тактика',
@@ -744,7 +746,10 @@ export function buildMainMenuKeyboard(
           { text: '🎁 Тёмный аукцион', callbackData: 'g:blindauc' },
           { text: '🎲 Верю — Не верю', callbackData: 'g:liarsdice' }
         ],
-        [{ text: '↩️ Главное меню', callbackData: 'menu:home' }]
+        [
+          { text: '💣 Горячая картошка', callbackData: 'g:hotpotato' },
+          { text: '↩️ Главное меню', callbackData: 'menu:home' }
+        ]
       ];
     }
 
@@ -1276,7 +1281,7 @@ function isSharedOrMultiAction(parts: string[]): boolean {
   const action = parts[0];
   const sub = parts[1];
   if (action === 'cr' || action === 'rr' || action === 'bjt' || action === 'blz') return true;
-  if (action === 'chk' || action === 'bau' || action === 'ldc') return true;
+  if (action === 'chk' || action === 'bau' || action === 'ldc' || action === 'hp') return true;
   if (action === 'bs') return sub === 'join' || sub === 'fire' || sub === 'peek' || sub === 'cancel';
   if (action === 'rc') return sub !== 'new';
   if (action === 'dl') return sub !== 'new';
@@ -2329,6 +2334,12 @@ export async function handleCallback(
     return;
   }
 
+  // Hot Potato ("Горячая картошка")
+  if (action === 'hp') {
+    await handleHotPotatoCallback(transport, chat, player, callbackId, messageId, parts);
+    return;
+  }
+
   await transport.answerCallback(callbackId);
 }
 
@@ -2419,6 +2430,11 @@ async function startGameFlow(
 
   if (game === 'liarsdice') {
     await startLiarsDiceLobby(transport, chat, player, stake, isLastDodep, messageId);
+    return;
+  }
+
+  if (game === 'hotpotato') {
+    await startHotPotatoLobby(transport, chat, player, stake, isLastDodep, messageId);
     return;
   }
 

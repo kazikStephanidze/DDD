@@ -33,10 +33,18 @@ export function clearRuntimeDirty(): void {
   runtimeDirty = false;
 }
 
+export function collectRuntimeEntries(): [string, unknown][] {
+  const out: [string, unknown][] = [];
+  for (const [key, adapter] of adapters.entries()) {
+    out.push([key, adapter.exportState()]);
+  }
+  return out;
+}
+
 export function collectRuntimeSnapshot(): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  for (const [key, adapter] of adapters.entries()) {
-    out[key] = adapter.exportState();
+  for (const [key, val] of collectRuntimeEntries()) {
+    out[key] = val;
   }
   return out;
 }

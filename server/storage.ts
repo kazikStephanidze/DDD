@@ -4,7 +4,7 @@ import { isFirebaseConfigured, rtdbGet, rtdbPatch, rtdbPut } from './firebaseDb.
 import {
   applyRuntimeSnapshot,
   clearRuntimeDirty,
-  collectRuntimeSnapshot,
+  collectRuntimeEntries,
   isRuntimeDirty,
   isServerlessRuntime
 } from './runtimeRegistry.js';
@@ -30,7 +30,8 @@ export type GameType =
   | 'battleship'
   | 'chicken'
   | 'blindauc'
-  | 'liarsdice';
+  | 'liarsdice'
+  | 'hotpotato';
 
 export type TalismanRarity = 'common' | 'rare' | 'epic' | 'legendary' | 'unique';
 
@@ -251,7 +252,7 @@ let lastFirebaseLoadAt = 0;
 let lastFirebaseSyncAt: number | null = null;
 let lastFirebaseError: string | null = null;
 let lastSavedMetaHash = '';
-let lastSavedRuntimeHash = '';
+const lastSavedRuntimeAdapterHashes = new Map<string, string>();
 const lastSavedChatHashes = new Map<string, string>();
 const lastSavedPhraseArchiveHashes = new Map<string, string>();
 let pendingLogsToArchive: BotLogEntry[] = [];
@@ -372,7 +373,18 @@ function normalizeDbSchema(target: DatabaseSchema, onlyChatId?: string): void {
   if (!target.trackedBotMessages) target.trackedBotMessages = [];
 }
 
+function pruneTrackedMessagesInMemory(now = Date.now(), maxKeep = 250): void {
+  if (!db.trackedBotMessages || db.trackedBotMessages.length === 0) return;
+  const staleCutoff = BOT_MESSAGE_TTL_MS * 2; // 10 min safe upper bound
+  const active = db.trackedBotMessages.filter((m) => {
+    const exp = m.expiresAt ?? m.sentAt + BOT_MESSAGE_TTL_MS;
+    return now - exp < staleCutoff;
+  });
+  db.trackedBotMessages = active.length > maxKeep ? active.slice(-maxKeep) : active;
+}
+
 function computeMetaHash(): string {
+  pruneTrackedMessagesInMemory();
   return JSON.stringify({
     timezone: db.timezone,
     telegramToken: db.telegramToken || null,
@@ -381,13 +393,11 @@ function computeMetaHash(): string {
   });
 }
 
-function computeRuntimeHash(): string {
-  return JSON.stringify(collectRuntimeSnapshot());
-}
-
 function updateSavedHashes(options?: { targetChatId?: string; markPhraseArchive?: boolean }): void {
   lastSavedMetaHash = computeMetaHash();
-  lastSavedRuntimeHash = computeRuntimeHash();
+  for (const [key, val] of collectRuntimeEntries()) {
+    lastSavedRuntimeAdapterHashes.set(key, JSON.stringify(val));
+  }
   const chats = options?.targetChatId
     ? [db.chats[options.targetChatId]].filter(Boolean)
     : Object.values(db.chats);
@@ -621,8 +631,8 @@ export async function flushDatabaseToFirebase(force = false, targetChatId?: stri
     return;
   }
 
+  pruneTrackedMessagesInMemory();
   const metaHash = computeMetaHash();
-  const runtimeHash = computeRuntimeHash();
   const patch: Record<string, unknown> = {};
 
   if (force || metaHash !== lastSavedMetaHash) {
@@ -672,8 +682,16 @@ export async function flushDatabaseToFirebase(force = false, targetChatId?: stri
     patch[`logsArchive/${logKey}`] = entry;
   }
 
-  if (force || isRuntimeDirty() || runtimeHash !== lastSavedRuntimeHash) {
-    patch.runtime = collectRuntimeSnapshot();
+  // Per-adapter runtime delta sync: only patch runtime/{adapterKey} subtrees that changed
+  const pendingRuntimeHashes = new Map<string, string>();
+  if (force || isRuntimeDirty()) {
+    for (const [adapterKey, adapterVal] of collectRuntimeEntries()) {
+      const adapterHash = JSON.stringify(adapterVal);
+      if (force || adapterHash !== lastSavedRuntimeAdapterHashes.get(adapterKey)) {
+        patch[`runtime/${adapterKey}`] = adapterVal;
+        pendingRuntimeHashes.set(adapterKey, adapterHash);
+      }
+    }
   }
 
   if (Object.keys(patch).length === 0) {
@@ -685,7 +703,9 @@ export async function flushDatabaseToFirebase(force = false, targetChatId?: stri
   try {
     await rtdbPatch('depBot', patch);
     lastSavedMetaHash = metaHash;
-    lastSavedRuntimeHash = runtimeHash;
+    for (const [ak, ah] of pendingRuntimeHashes.entries()) {
+      lastSavedRuntimeAdapterHashes.set(ak, ah);
+    }
     for (const [cid, h] of pendingChatHashes.entries()) {
       lastSavedChatHashes.set(cid, h);
     }
@@ -773,6 +793,16 @@ export async function pruneFirebaseArchives(): Promise<void> {
         }
         await rtdbPatch('depBot/logsArchive', logsPatch);
       }
+    }
+
+    // Batch-compact stale trackedBotMessages inside meta so it stays tiny on Vercel
+    const prevCount = db.trackedBotMessages?.length || 0;
+    pruneTrackedMessagesInMemory(now, 200);
+    if ((db.trackedBotMessages?.length || 0) !== prevCount) {
+      await rtdbPatch('depBot/meta', {
+        trackedBotMessages: db.trackedBotMessages || []
+      });
+      lastSavedMetaHash = computeMetaHash();
     }
   } catch (err: any) {
     console.warn('[Archive Prune] Skipped:', err?.message || err);
@@ -1020,9 +1050,7 @@ export function trackBotMessage(chatId: string, messageId: string, ttlMs: number
     sentAt: now,
     expiresAt: now + ttlMs
   });
-  if (db.trackedBotMessages.length > 2000) {
-    db.trackedBotMessages = db.trackedBotMessages.slice(-2000);
-  }
+  pruneTrackedMessagesInMemory(now, 250);
   scheduleSave();
 }
 

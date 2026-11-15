@@ -89,8 +89,8 @@ function pushSimMessage(chatId: string, msg: Omit<SimMessage, 'id' | 'timestamp'
     timestamp: Date.now(),
     ...msg
   });
-  if (list.length > 50) {
-    simMessagesByChat.set(chatId, list.slice(-50));
+  if (list.length > 25) {
+    simMessagesByChat.set(chatId, list.slice(-25));
   }
   markRuntimeDirty();
   return id;
@@ -171,7 +171,7 @@ registerRuntimeAdapter('simulator', {
   exportState: () => ({
     messagesByChat: Array.from(simMessagesByChat.entries()).map(([chatId, msgs]) => [
       chatId,
-      msgs.slice(-40)
+      msgs.slice(-20)
     ]),
     lastSimToast
   }),
@@ -180,7 +180,7 @@ registerRuntimeAdapter('simulator', {
     if (Array.isArray(raw?.messagesByChat)) {
       for (const entry of raw.messagesByChat) {
         if (Array.isArray(entry) && typeof entry[0] === 'string' && Array.isArray(entry[1])) {
-          simMessagesByChat.set(entry[0], entry[1]);
+          simMessagesByChat.set(entry[0], entry[1].slice(-25));
         }
       }
     }
@@ -251,7 +251,7 @@ export function createExpressApp(): express.Express {
 
   app.get('/api/status', async (_req, res) => {
     try {
-      await ensureDatabaseLoaded({ minIntervalMs: 2000, includeLogs: true, includePhraseArchive: false });
+      await ensureDatabaseLoaded({ minIntervalMs: 5000, includeLogs: true, includePhraseArchive: false });
       const db = getDb();
       const tg = isServerlessRuntime()
         ? await refreshServerlessTelegramStatus()

@@ -28,6 +28,7 @@ import {
   scheduleSave
 } from '../storage.js';
 import {
+  isServerlessRuntime,
   markRuntimeDirty,
   registerRuntimeAdapter,
   resolveRuntimeTransport
@@ -1743,6 +1744,444 @@ export async function handleLiarsDiceCallback(
 }
 
 // =====================================
+// GAME #5: HOT POTATO ("ГОРЯЧАЯ КАРТОШКА" · 2–6 ИГРОКОВ)
+// =====================================
+
+interface HotPotatoSeat {
+  userId: string;
+  firstName: string;
+  isAllIn: boolean;
+  isLastDodep: boolean;
+}
+
+interface HotPotatoGame {
+  id: string;
+  chatId: string;
+  stake: number;
+  creatorId: string;
+  seats: HotPotatoSeat[];
+  holderId: string;
+  holderName: string;
+  passesCount: number;
+  fuseCharges: number;
+  explodeAt: number;
+  lastEventText: string;
+  status: 'waiting' | 'playing' | 'finished';
+  messageId: string | null;
+  fuseTimer: NodeJS.Timeout | null;
+  transportSource?: 'telegram' | 'simulator';
+  transport?: BotTransport | null;
+  createdAt: number;
+}
+
+const hotPotatoGames = new Map<string, HotPotatoGame>();
+
+function getFuseVisual(game: HotPotatoGame): string {
+  const leftMs = Math.max(0, game.explodeAt - Date.now());
+  if (game.fuseCharges <= 2 || leftMs <= 6000) return '🔴 КРИТИЧЕСКИ КОРОТКИЙ!';
+  if (game.fuseCharges <= 4 || leftMs <= 12000) return '🟡 Тлеет быстро!';
+  return '🟢 Фитиль ещё горит';
+}
+
+function buildHotPotatoPayload(game: HotPotatoGame): { text: string; keyboard: InlineKeyboard } {
+  const pot = game.stake * game.seats.length;
+  if (game.status === 'waiting') {
+    const lines = [
+      `💣 ГОРЯЧАЯ КАРТОШКА (2–6 ИГРОКОВ)`,
+      `🪙 Ставка: ${game.stake} 🪙 · Банк: ${pot} 🪙`,
+      ``,
+      `👥 В круге (${game.seats.length}/6):`,
+      ...game.seats.map((s, idx) => `${idx + 1}. ${s.firstName}`),
+      ``,
+      `Запали динамит и перекидывай бомбу по кругу! На ком рвануло — выбывает, остальные делят весь банк!`
+    ];
+    const kb: InlineKeyboard = [
+      [{ text: `🧨 Встать в круг (${game.stake} 🪙)`, callbackData: `hp:join:${game.id}` }],
+      [
+        ...(game.seats.length >= 2 ? [{ text: '🔥 Запалить динамит!', callbackData: `hp:start:${game.id}` }] : []),
+        { text: '❌ Отменить игру', callbackData: `hp:cancel:${game.id}` }
+      ]
+    ];
+    return { text: lines.join('\n'), keyboard: kb };
+  }
+
+  const leftSec = Math.max(0, Math.ceil((game.explodeAt - Date.now()) / 1000));
+  const lines = [
+    `💣 ГОРЯЧАЯ КАРТОШКА — ДИНАМИТ ЗАЖЖЁН!`,
+    `🏦 Банк: ${pot} 🪙 · Бросков: ${game.passesCount} · ⏱ ~${leftSec} сек`,
+    `🔥 Состояние: ${getFuseVisual(game)}`,
+    ``,
+    `🧨 БОМБА В РУКАХ: 👉 ${game.holderName}!`,
+    `Участники: ${game.seats.map((s) => (s.userId === game.holderId ? `💣 ${s.firstName}` : s.firstName)).join(' · ')}`
+  ];
+  if (game.lastEventText) lines.push(``, game.lastEventText);
+
+  const kb: InlineKeyboard = [
+    [{ text: '💨 Перекинуть случайному (-1)', callbackData: `hp:toss:${game.id}:rand` }],
+    [{ text: '⚡ Подкрутить и швырнуть (-2 · риск!)', callbackData: `hp:toss:${game.id}:fast` }],
+    [{ text: '⏱ Проверить фитиль', callbackData: `hp:tick:${game.id}` }]
+  ];
+  return { text: lines.join('\n'), keyboard: kb };
+}
+
+async function detonateHotPotato(
+  chat: ChatState,
+  game: HotPotatoGame,
+  victimId: string,
+  reasonLine: string
+): Promise<void> {
+  if (game.status === 'finished') return;
+  game.status = 'finished';
+  if (game.fuseTimer) {
+    clearTimeout(game.fuseTimer);
+    game.fuseTimer = null;
+  }
+  hotPotatoGames.delete(game.id);
+  markRuntimeDirty();
+
+  const victimSeat = game.seats.find((s) => s.userId === victimId) || game.seats[0];
+  const survivors = game.seats.filter((s) => s.userId !== victimSeat.userId);
+  const pot = game.stake * game.seats.length;
+  const share = Math.floor(pot / Math.max(1, survivors.length));
+
+  for (const w of survivors) {
+    const ps = chat.players[w.userId];
+    if (!ps) continue;
+    ps.balance += share;
+    ps.lastBetAmount = game.stake;
+    ps.lastGameType = 'hotpotato';
+    const net = share - game.stake;
+    ps.stats.totalWon += Math.max(0, net);
+    if (w.isLastDodep && ps.lastActionWasLoss) ps.stats.lastDodepWins += 1;
+    ps.lastActionWasLoss = false;
+    ps.lastActionWasLastDodep = false;
+    recordGameOutcome(chat, ps, 'hotpotato', net, { isAllIn: w.isAllIn, isLastDodep: w.isLastDodep });
+  }
+
+  const loserPs = chat.players[victimSeat.userId];
+  if (loserPs) {
+    loserPs.lastBetAmount = game.stake;
+    loserPs.lastGameType = 'hotpotato';
+    loserPs.stats.totalLost += game.stake;
+    loserPs.lastActionWasLoss = true;
+    loserPs.lastActionWasLastDodep = false;
+    recordGameOutcome(chat, loserPs, 'hotpotato', -game.stake, {
+      isAllIn: victimSeat.isAllIn,
+      isLastDodep: victimSeat.isLastDodep
+    });
+  }
+  scheduleSave();
+
+  const tr = getPartyTransport(game.transportSource, chat.chatId, game.transport);
+  addBotLog({
+    source: tr?.source || 'telegram',
+    chatId: chat.chatId,
+    chatTitle: chat.title,
+    userName: victimSeat.firstName,
+    event: 'Горячая картошка: ВЗРЫВ!',
+    detail: `Рвануло у ${victimSeat.firstName} после ${game.passesCount} бросков · Выжившим по ${share} 🪙`
+  });
+
+  const lines = [
+    `💥 БАБАХ!! ГОРЯЧАЯ КАРТОШКА ВЗОРВАЛАСЬ!`,
+    reasonLine,
+    ``,
+    `💀 Подорвался: ${victimSeat.firstName} (-${game.stake} 🪙)`,
+    `🏆 Выжившие (${survivors.map((s) => s.firstName).join(', ')}) делят банк и получают по ${share} 🪙!`
+  ];
+
+  if (tr) {
+    const kb = buildPostGameKeyboard('hotpotato', game.stake, false);
+    if (game.messageId) {
+      await tr.editMessage(chat.chatId, game.messageId, lines.join('\n'), kb);
+    } else {
+      await tr.sendMessage(chat.chatId, lines.join('\n'), kb);
+    }
+    for (const w of survivors) {
+      const ps = chat.players[w.userId];
+      if (ps && share - game.stake > 0) await applyAutoDebtCollection(tr, chat, ps, share - game.stake);
+    }
+    if (loserPs && loserPs.balance === 0) await maybeSendZeroBalanceOffer(tr, chat, loserPs);
+  }
+}
+
+function igniteHotPotatoFuse(chat: ChatState, game: HotPotatoGame): void {
+  const durationMs = 16_000 + Math.floor(Math.random() * 14_000); // 16..30 sec
+  game.status = 'playing';
+  game.fuseCharges = 5 + Math.floor(Math.random() * 6); // 5..10 hidden charges
+  game.explodeAt = Date.now() + durationMs;
+  const starter = game.seats[Math.floor(Math.random() * game.seats.length)];
+  game.holderId = starter.userId;
+  game.holderName = starter.firstName;
+  game.lastEventText = `🔥 Фитиль зажжён! Бомба стартует у ${starter.firstName}!`;
+
+  if (!isServerlessRuntime()) {
+    if (game.fuseTimer) clearTimeout(game.fuseTimer);
+    game.fuseTimer = setTimeout(() => {
+      if (game.status === 'playing') {
+        void detonateHotPotato(
+          chat,
+          game,
+          game.holderId,
+          `⏱ Время вышло! Динамит рванул в руках у ${game.holderName}!`
+        );
+      }
+    }, durationMs);
+  }
+}
+
+export async function startHotPotatoLobby(
+  transport: BotTransport,
+  chat: ChatState,
+  player: PlayerState,
+  stake: number,
+  isLastDodep: boolean,
+  messageId?: string
+): Promise<void> {
+  const isAllIn = deductPlayerStake(player, stake);
+  scheduleSave();
+
+  const id = shortId();
+  const game: HotPotatoGame = {
+    id,
+    chatId: chat.chatId,
+    stake,
+    creatorId: player.userId,
+    seats: [
+      {
+        userId: player.userId,
+        firstName: displayName(player),
+        isAllIn,
+        isLastDodep
+      }
+    ],
+    holderId: player.userId,
+    holderName: displayName(player),
+    passesCount: 0,
+    fuseCharges: 8,
+    explodeAt: Date.now() + 24_000,
+    lastEventText: '',
+    status: 'waiting',
+    messageId: messageId || null,
+    fuseTimer: null,
+    transportSource: transport.source,
+    transport,
+    createdAt: Date.now()
+  };
+  hotPotatoGames.set(id, game);
+  markRuntimeDirty();
+
+  const view = buildHotPotatoPayload(game);
+  if (messageId) {
+    await transport.editMessage(chat.chatId, messageId, view.text, view.keyboard);
+    game.messageId = messageId;
+  } else {
+    game.messageId = await transport.sendMessage(chat.chatId, view.text, view.keyboard);
+  }
+}
+
+export async function handleHotPotatoCallback(
+  transport: BotTransport,
+  chat: ChatState,
+  player: PlayerState,
+  callbackId: string,
+  messageId: string,
+  parts: string[]
+): Promise<void> {
+  const sub = parts[1];
+  const gid = parts[2];
+  const game = hotPotatoGames.get(gid);
+  if (!game) {
+    await transport.answerCallback(callbackId, 'Этот динамит уже взорвался!', true);
+    return;
+  }
+
+  if (sub === 'cancel') {
+    if (game.status !== 'waiting') {
+      await transport.answerCallback(callbackId, 'Фитиль уже горит — поздно отменять!', true);
+      return;
+    }
+    if (game.creatorId !== player.userId) {
+      await transport.answerCallback(callbackId, 'Отменить может только создатель!', true);
+      return;
+    }
+    game.status = 'finished';
+    hotPotatoGames.delete(gid);
+    markRuntimeDirty();
+    for (const s of game.seats) {
+      const ps = chat.players[s.userId];
+      if (ps) ps.balance += game.stake;
+    }
+    scheduleSave();
+    await transport.answerCallback(callbackId, 'Игра отменена, ставки возвращены.');
+    await transport.editMessage(
+      chat.chatId,
+      game.messageId || messageId,
+      `❌ Игра «Горячая картошка» отменена. Ставки возвращены (${game.seats.length} чел.).`,
+      [[{ text: '🏠 В меню', callbackData: 'menu' }]]
+    );
+    return;
+  }
+
+  if (sub === 'join') {
+    if (game.status !== 'waiting') {
+      await transport.answerCallback(callbackId, 'Динамит уже горит!', true);
+      return;
+    }
+    if (game.seats.some((s) => s.userId === player.userId)) {
+      await transport.answerCallback(callbackId, 'Ты уже в круге!', true);
+      return;
+    }
+    if (game.seats.length >= 6) {
+      await transport.answerCallback(callbackId, 'Круг полон (6 игроков)!', true);
+      return;
+    }
+    const ghostMs = getGhostRemainingMs(player);
+    if (ghostMs > 0) {
+      await transport.answerCallback(callbackId, `👻 Призрак чата ещё ${formatDuration(ghostMs)}!`, true);
+      return;
+    }
+    if (player.balance < game.stake) {
+      await transport.answerCallback(callbackId, `Нужно ${game.stake} 🪙 (у тебя ${player.balance} 🪙)!`, true);
+      return;
+    }
+
+    const isAllIn = deductPlayerStake(player, game.stake);
+    game.seats.push({
+      userId: player.userId,
+      firstName: displayName(player),
+      isAllIn,
+      isLastDodep: false
+    });
+    const autoStarted = game.seats.length >= 6;
+    if (autoStarted) {
+      igniteHotPotatoFuse(chat, game);
+    }
+    markRuntimeDirty();
+    scheduleSave();
+
+    await transport.answerCallback(
+      callbackId,
+      autoStarted ? '🔥 Круг полон — динамит зажжён!' : '🧨 Ты встал в круг!'
+    );
+    const view = buildHotPotatoPayload(game);
+    await transport.editMessage(chat.chatId, game.messageId || messageId, view.text, view.keyboard);
+    return;
+  }
+
+  if (sub === 'start') {
+    if (game.status !== 'waiting') {
+      await transport.answerCallback(callbackId, 'Фитиль уже горит!', true);
+      return;
+    }
+    if (game.seats.length < 2) {
+      await transport.answerCallback(callbackId, 'Нужно минимум 2 игрока!', true);
+      return;
+    }
+    if (!game.seats.some((s) => s.userId === player.userId)) {
+      await transport.answerCallback(callbackId, 'Запалить может участник круга!', true);
+      return;
+    }
+    igniteHotPotatoFuse(chat, game);
+    markRuntimeDirty();
+    await transport.answerCallback(callbackId, '🔥 Динамит зажжён! Перекидывайте быстрее!');
+    const view = buildHotPotatoPayload(game);
+    await transport.editMessage(chat.chatId, game.messageId || messageId, view.text, view.keyboard);
+    return;
+  }
+
+  if (game.status !== 'playing') {
+    await transport.answerCallback(callbackId, 'Раунд уже завершён.', true);
+    return;
+  }
+
+  if (sub === 'tick') {
+    if (Date.now() >= game.explodeAt) {
+      await transport.answerCallback(callbackId, '💥 Время вышло — БАБАХ!', true);
+      await detonateHotPotato(
+        chat,
+        game,
+        game.holderId,
+        `⏱ Фитиль догорел до конца в руках у ${game.holderName}!`
+      );
+      return;
+    }
+    await transport.answerCallback(callbackId, `⏱ До взрыва ещё ~${Math.max(1, Math.ceil((game.explodeAt - Date.now()) / 1000))} сек`);
+    const view = buildHotPotatoPayload(game);
+    await transport.editMessage(chat.chatId, game.messageId || messageId, view.text, view.keyboard);
+    return;
+  }
+
+  if (sub === 'toss') {
+    if (Date.now() >= game.explodeAt) {
+      await transport.answerCallback(callbackId, '💥 Поздно! Динамит рванул прямо в руках!', true);
+      await detonateHotPotato(
+        chat,
+        game,
+        game.holderId,
+        `⏱ ${game.holderName} не успел перекинуть — фитиль догорел!`
+      );
+      return;
+    }
+
+    if (game.holderId !== player.userId) {
+      await transport.answerCallback(callbackId, `Бомба сейчас у ${game.holderName}, не у тебя!`, true);
+      return;
+    }
+
+    const mode = parts[3] === 'fast' ? 'fast' : 'rand';
+    if (mode === 'fast' && Math.random() < 0.2) {
+      await transport.answerCallback(callbackId, '💥 Перекрутил фитиль — рвануло прямо в руках!', true);
+      await detonateHotPotato(
+        chat,
+        game,
+        player.userId,
+        `⚡ ${game.holderName} попытался подкрутить фитиль, и шашка рванула прямо в руках!`
+      );
+      return;
+    }
+
+    const others = game.seats.filter((s) => s.userId !== game.holderId);
+    const nextSeat = others[Math.floor(Math.random() * others.length)] || game.seats[0];
+    const prevName = game.holderName;
+
+    game.holderId = nextSeat.userId;
+    game.holderName = nextSeat.firstName;
+    game.passesCount += 1;
+    if (mode === 'fast') {
+      game.fuseCharges -= 2;
+      game.explodeAt -= 3000;
+    } else {
+      game.fuseCharges -= 1;
+    }
+
+    if (game.fuseCharges <= 0 || Date.now() >= game.explodeAt) {
+      await transport.answerCallback(callbackId, `💥 Швырнул к ${nextSeat.firstName} — И ТАМ БАБАХНУЛО!`);
+      await detonateHotPotato(
+        chat,
+        game,
+        nextSeat.userId,
+        `💣 ${prevName} перекинул шашку ${nextSeat.firstName}, и фитиль тут же догорел!`
+      );
+      return;
+    }
+
+    game.lastEventText =
+      mode === 'fast'
+        ? `⚡ ${prevName} подкрутил фитиль и швырнул бомбу к ${nextSeat.firstName}!`
+        : `💨 ${prevName} перекинул динамит к ${nextSeat.firstName}!`;
+    markRuntimeDirty();
+
+    await transport.answerCallback(callbackId, `💨 Бомба полетела к ${nextSeat.firstName}!`);
+    const view = buildHotPotatoPayload(game);
+    await transport.editMessage(chat.chatId, game.messageId || messageId, view.text, view.keyboard);
+    return;
+  }
+
+  await transport.answerCallback(callbackId);
+}
+
+// =====================================
 // PROTECTED MESSAGES, SWEEPER & RUNTIME ADAPTER
 // =====================================
 
@@ -1751,6 +2190,7 @@ export function isPartyGamesProtectedMsg(msgId: string): boolean {
   for (const d of chickenDuels.values()) if (d.messageId === msgId) return true;
   for (const l of blindLots.values()) if (l.messageId === msgId) return true;
   for (const g of liarsGames.values()) if (g.messageId === msgId) return true;
+  for (const h of hotPotatoGames.values()) if (h.messageId === msgId) return true;
   return false;
 }
 
@@ -1836,6 +2276,44 @@ export async function sweepExpiredPartyGames(now = Date.now()): Promise<void> {
       }
     }
   }
+
+  // 5. Hot Potato: detonate expired active games or refund expired waiting lobbies (4 min)
+  for (const [id, h] of Array.from(hotPotatoGames.entries())) {
+    const chat = db.chats[h.chatId];
+    if (!chat) {
+      if (h.fuseTimer) clearTimeout(h.fuseTimer);
+      hotPotatoGames.delete(id);
+      continue;
+    }
+    if (h.status === 'playing' && now >= h.explodeAt) {
+      await detonateHotPotato(
+        chat,
+        h,
+        h.holderId,
+        `⏱ Фитиль догорел до конца в руках у ${h.holderName}!`
+      );
+      continue;
+    }
+    if (h.status === 'waiting' && now - h.createdAt >= LOBBY_IDLE_TTL_MS) {
+      hotPotatoGames.delete(id);
+      h.status = 'finished';
+      markRuntimeDirty();
+      for (const s of h.seats) {
+        const ps = chat.players[s.userId];
+        if (ps) ps.balance += h.stake;
+      }
+      scheduleSave();
+      const tr = getPartyTransport(h.transportSource, h.chatId, h.transport);
+      if (h.messageId && tr) {
+        await tr.editMessage(
+          h.chatId,
+          h.messageId,
+          `⏱ Игра «Горячая картошка» закрыта по таймауту (4 мин). Все ставки возвращены.`,
+          [[{ text: '🏠 В меню', callbackData: 'menu' }]]
+        );
+      }
+    }
+  }
 }
 
 registerRuntimeAdapter('partyGames', {
@@ -1855,13 +2333,21 @@ registerRuntimeAdapter('partyGames', {
     liarsGames: Array.from(liarsGames.values()).map(({ transport: _tr, ...rest }) => ({
       ...rest,
       transportSource: rest.transportSource || (_tr?.source ?? (rest.chatId.startsWith('sim-') ? 'simulator' : 'telegram'))
+    })),
+    hotPotatoGames: Array.from(hotPotatoGames.values()).map(({ fuseTimer: _ft, transport: _tr, ...rest }) => ({
+      ...rest,
+      transportSource: rest.transportSource || (_tr?.source ?? (rest.chatId.startsWith('sim-') ? 'simulator' : 'telegram'))
     }))
   }),
   importState: (raw: any) => {
+    for (const h of hotPotatoGames.values()) {
+      if (h.fuseTimer) clearTimeout(h.fuseTimer);
+    }
     battleshipGames.clear();
     chickenDuels.clear();
     blindLots.clear();
     liarsGames.clear();
+    hotPotatoGames.clear();
 
     if (Array.isArray(raw?.battleshipGames)) {
       for (const g of raw.battleshipGames) {
@@ -1888,6 +2374,18 @@ registerRuntimeAdapter('partyGames', {
       for (const g of raw.liarsGames) {
         if (g?.id && g.status !== 'finished') {
           liarsGames.set(g.id, { ...g, seats: Array.isArray(g.seats) ? g.seats : [], transport: null });
+        }
+      }
+    }
+    if (Array.isArray(raw?.hotPotatoGames)) {
+      for (const h of raw.hotPotatoGames) {
+        if (h?.id && h.status !== 'finished') {
+          hotPotatoGames.set(h.id, {
+            ...h,
+            seats: Array.isArray(h.seats) ? h.seats : [],
+            fuseTimer: null,
+            transport: null
+          });
         }
       }
     }

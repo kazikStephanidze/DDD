@@ -71,7 +71,8 @@ export const GAME_TITLES: Record<GameType, string> = {
   battleship: '⚓ Морской бой (4×4 · Соло / PvP)',
   chicken: '🐔 Курица / Трусишка (Дуэль 1×1)',
   blindauc: '🎁 Тёмный аукцион (Слепой лот)',
-  liarsdice: '🎲 Верю — Не верю (Блеф на костях)'
+  liarsdice: '🎲 Верю — Не верю (Блеф на костях)',
+  hotpotato: '💣 Горячая картошка (Динамит на 2–6 чел.)'
 };
 
 export const GAME_RULES_SHORT: Record<GameType, string> = {
@@ -95,7 +96,8 @@ export const GAME_RULES_SHORT: Record<GameType, string> = {
   battleship: 'Поле 4×4 и 3 корабля (4 клетки). Играй против Дяди Депа (до x3.0 за быстрый потоп!) или брось PvP-вызов 1×1 в чат (попал — бьёшь ещё!).',
   chicken: 'Нервная дуэль 1×1! В каждом раунде оба выбирают «Жать дальше» или «Струсить». Чем дальше дойдёте — тем выше куш (до x5), но можно сгореть!',
   blindauc: 'Дядя Деп выставляет запечатанный лот с наводкой: внутри от дырявого носка (x0.2) до слитка (x4.0) и редкого талисмана!',
-  liarsdice: 'Блеф на 2–4 игроков (по 3 скрытые кости у каждого)! Смотри свои кости тайно, поднимай заявку или жми «НЕ ВЕРЮ!».'
+  liarsdice: 'Блеф на 2–4 игроков (по 3 скрытые кости у каждого)! Смотри свои кости тайно, поднимай заявку или жми «НЕ ВЕРЮ!».',
+  hotpotato: 'Динамит на 2–6 игроков со скрытым фитилём! Перекидывай бомбу дальше или подкрути фитиль (-2 заряда, риск самоподрыва). У кого рвануло — платит выжившим!'
 };
 
 export function shortId(): string {
@@ -108,8 +110,8 @@ const playerActiveMenuMsgId = new Map<string, string>();
 
 registerRuntimeAdapter('engineShared', {
   exportState: () => ({
-    messageOwnerByKey: Array.from(messageOwnerByKey.entries()).slice(-400),
-    playerActiveMenuMsgId: Array.from(playerActiveMenuMsgId.entries()).slice(-200)
+    messageOwnerByKey: Array.from(messageOwnerByKey.entries()).slice(-200),
+    playerActiveMenuMsgId: Array.from(playerActiveMenuMsgId.entries()).slice(-120)
   }),
   importState: (raw: any) => {
     messageOwnerByKey.clear();

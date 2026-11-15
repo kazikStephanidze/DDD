@@ -18,7 +18,7 @@ export function ConceptView({ telegram, timezone }: ConceptViewProps) {
       {/* Section 1: Games */}
       <section className="bg-white border border-slate-200 rounded-xl divide-y divide-slate-200">
         <div className="p-6">
-          <h2 className="text-lg font-bold text-slate-900">1. Двадцать одна игра + Аукцион, Общий Котёл, Блиц и Лотерея</h2>
+          <h2 className="text-lg font-bold text-slate-900">1. Двадцать две игры + Аукцион, Общий Котёл, Блиц и Лотерея</h2>
           <p className="text-sm text-slate-600 mt-1">
             После команды <span className="font-mono-num font-semibold">/start</span> или{' '}
             <span className="font-mono-num font-semibold">/menu</span> бот удаляет прошлое неактивное меню игрока и дальше работает внутри{' '}
@@ -173,6 +173,13 @@ export function ConceptView({ telegram, timezone }: ConceptViewProps) {
             <h3 className="font-bold text-slate-900">1.21. Верю — Не верю (Блеф на костях · 2–4 игрока)</h3>
             <p className="mt-1">
               У каждого участника по 3 скрытые кости (просмотр по секретной кнопке во всплывающем окне). Игроки по кругу повышают заявку на количество одинаковых граней на всём столе или жмут «НЕ ВЕРЮ! ВСКРЫВАЕМ!». Пойманный блеф или ошибка проверяющего отдают весь банк победителям.
+            </p>
+          </div>
+
+          <div>
+            <h3 className="font-bold text-slate-900">1.22. Горячая картошка (Динамит на 2–6 игроков)</h3>
+            <p className="mt-1">
+              Участники встают в круг и скидываются в банк. Динамит зажигается со скрытым числом зарядов фитиля и таймером 16–30 секунд: держатель перекидывает бомбу случайному сопернику («-1 заряд») или подкручивает фитиль («-2 заряда» с шансом самоподрыва). У кого шашка рванула — вылетает, выжившие делят весь банк!
             </p>
           </div>
         </div>
