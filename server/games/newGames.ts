@@ -1626,260 +1626,7 @@ export async function handlePenaltyCallback(
 }
 
 // =====================================
-// 5. DICE POKER ("ПОКЕР НА КОСТЯХ — 5 КУБИКОВ + 1 ПЕРЕБРОС")
-// =====================================
-
-interface DicePokerSession {
-  id: string;
-  chatId: string;
-  userId: string;
-  userName: string;
-  stake: number;
-  isLastDodep: boolean;
-  isAllIn: boolean;
-  dice: number[]; // length 5, values 1..6
-  rerollMarks: boolean[]; // true = reroll
-  status: 'reroll' | 'finished';
-  createdAt: number;
-}
-
-const dicePokerSessions = new Map<string, DicePokerSession>();
-
-function evaluateDicePokerHand(dice: number[]): {
-  name: string;
-  mult: number;
-  isBig: boolean;
-} {
-  const counts = new Map<number, number>();
-  for (const d of dice) counts.set(d, (counts.get(d) || 0) + 1);
-  const freqs = [...counts.values()].sort((a, b) => b - a);
-  const sortedUnique = [...counts.keys()].sort((a, b) => a - b);
-
-  if (freqs[0] === 5) return { name: '👑 ПОКЕР (5 одинаковых)', mult: 30, isBig: true };
-  if (freqs[0] === 4) return { name: '🔥 КАРЕ (4 одинаковых)', mult: 12, isBig: true };
-  if (freqs[0] === 3 && freqs[1] === 2) return { name: '💎 ФУЛЛ-ХАУС (3 + 2)', mult: 6, isBig: true };
-
-  const isSmallOrLargeStraight =
-    sortedUnique.length === 5 &&
-    ((sortedUnique[0] === 1 && sortedUnique[4] === 5) || (sortedUnique[0] === 2 && sortedUnique[4] === 6));
-  if (isSmallOrLargeStraight) return { name: '⚡ СТРИТ (5 подряд)', mult: 4, isBig: false };
-
-  if (freqs[0] === 3) return { name: '🎯 СЕТ (3 одинаковых)', mult: 2.5, isBig: false };
-  if (freqs[0] === 2 && freqs[1] === 2) return { name: '✨ ДВЕ ПАРЫ', mult: 1.2, isBig: false };
-  if (freqs[0] === 2) return { name: '🪙 ПАРА (кэшбэк)', mult: 0.5, isBig: false };
-  return { name: '🥀 ПУСТО (старшая кость)', mult: 0, isBig: false };
-}
-
-function buildDicePokerPayload(chat: ChatState, player: PlayerState, session: DicePokerSession): { text: string; keyboard: InlineKeyboard } {
-  const evalNow = evaluateDicePokerHand(session.dice);
-  const diceVisual = session.dice
-    .map((d, i) => `${session.rerollMarks[i] ? '🔄' : '🔒'}[${d}]`)
-    .join('  ');
-
-  const lines = [
-    `🎲 ПОКЕР НА КОСТЯХ (5 КУБИКОВ · 1 ПЕРЕБРОС)`,
-    `👤 ${playerLabel(chat, player)} | Ставка: ${session.stake} 🪙`,
-    ``,
-    `Твой бросок: ${diceVisual}`,
-    `Текущая рука: ${evalNow.name} (x${evalNow.mult})`,
-    ``,
-    `Выплаты: Покер x30 · Каре x12 · Фулл-хаус x6 · Стрит x4 · Сет x2.5 · 2 пары x1.2 · Пара x0.5`,
-    `Отметь кости для переброса (🔄) и жми кнопку ниже:`
-  ];
-
-  const diceRow: InlineButton[] = session.dice.map((d, idx) => ({
-    text: `${session.rerollMarks[idx] ? '🔄' : '🔒'} ${d}`,
-    callbackData: `dp:tog:${session.id}:${idx}`
-  }));
-  const markedCount = session.rerollMarks.filter(Boolean).length;
-
-  const kb: InlineKeyboard = [
-    diceRow,
-    [
-      { text: `🎲 Перебросить (${markedCount})`, callbackData: `dp:reroll:${session.id}` },
-      { text: `✅ Засчитать сейчас (x${evalNow.mult})`, callbackData: `dp:keep:${session.id}` }
-    ]
-  ];
-  return { text: lines.join('\n'), keyboard: kb };
-}
-
-async function finishDicePoker(
-  transport: BotTransport,
-  chat: ChatState,
-  player: PlayerState,
-  session: DicePokerSession,
-  messageId: string
-): Promise<void> {
-  session.status = 'finished';
-  dicePokerSessions.delete(session.id);
-
-  const hand = evaluateDicePokerHand(session.dice);
-  const payout = Math.round(session.stake * hand.mult);
-  const netProfit = payout - session.stake;
-  const wasLoss = payout < session.stake;
-
-  player.lastBetAmount = session.stake;
-  player.lastGameType = 'dicepoker';
-
-  if (payout > session.stake) {
-    player.balance += payout;
-    player.stats.totalWon += netProfit;
-    if (session.isLastDodep && player.lastActionWasLoss) {
-      player.stats.lastDodepWins += 1;
-    }
-    player.lastActionWasLoss = false;
-  } else if (payout > 0) {
-    player.balance += payout;
-    player.stats.totalLost += session.stake - payout;
-    player.lastActionWasLoss = true;
-  } else {
-    player.stats.totalLost += session.stake;
-    player.lastActionWasLoss = true;
-  }
-  player.lastActionWasLastDodep = false;
-
-  if (hand.isBig) unlockAchievement(chat, player, 'dice_shark');
-  recordGameOutcome(chat, player, 'dicepoker', netProfit, {
-    isAllIn: session.isAllIn,
-    isLastDodep: session.isLastDodep
-  });
-  scheduleSave();
-
-  addBotLog({
-    source: transport.source,
-    chatId: chat.chatId,
-    chatTitle: chat.title,
-    userName: session.userName,
-    event: `Покер на костях: ${hand.name}`,
-    detail: `[${session.dice.join('-')}] · Ставка ${session.stake} → Выплата ${payout} 🪙`
-  });
-
-  const outcomeLine =
-    payout > session.stake
-      ? `🏆 ВЫИГРЫШ (x${hand.mult})! +${payout} фантиков (чистыми +${netProfit})!`
-      : payout > 0
-        ? `🪙 КЭШБЭК (x${hand.mult}): вернулось ${payout} из ${session.stake} 🪙.`
-        : `💀 ПУСТО! Ставка ${session.stake} 🪙 сгорела.`;
-
-  await transport.editMessage(
-    chat.chatId,
-    messageId,
-    [
-      `🎲 ПОКЕР НА КОСТЯХ — ИТОГ`,
-      `👤 ${playerLabel(chat, player)} | Ставка: ${session.stake} 🪙`,
-      ``,
-      `Финальные кости: ${session.dice.map((d) => `[🎲${d}]`).join(' ')}`,
-      `Комбинация: ${hand.name}`,
-      outcomeLine,
-      `🪙 Баланс: ${player.balance} фантиков`,
-      ``,
-      nextPhrase(chat, payout >= session.stake ? 'dicePokerWin' : 'dicePokerLoss')
-    ].join('\n'),
-    buildPostGameKeyboard('dicepoker', session.stake, wasLoss, player)
-  );
-
-  if (netProfit > 0) {
-    await applyAutoDebtCollection(transport, chat, player, netProfit);
-  } else if (player.balance === 0) {
-    await maybeSendZeroBalanceOffer(transport, chat, player);
-  }
-}
-
-export async function startDicePokerGame(
-  transport: BotTransport,
-  chat: ChatState,
-  player: PlayerState,
-  stake: number,
-  isLastDodep: boolean,
-  messageId?: string
-): Promise<void> {
-  const isAllIn = deductPlayerStake(player, stake);
-  scheduleSave();
-
-  const dice = Array.from({ length: 5 }, () => Math.floor(Math.random() * 6) + 1);
-  const sid = shortId();
-  const session: DicePokerSession = {
-    id: sid,
-    chatId: chat.chatId,
-    userId: player.userId,
-    userName: displayName(player),
-    stake,
-    isLastDodep,
-    isAllIn,
-    dice,
-    rerollMarks: [false, false, false, false, false],
-    status: 'reroll',
-    createdAt: Date.now()
-  };
-  dicePokerSessions.set(sid, session);
-  markRuntimeDirty();
-
-  const view = buildDicePokerPayload(chat, player, session);
-  if (messageId) {
-    await transport.editMessage(chat.chatId, messageId, view.text, view.keyboard);
-  } else {
-    await transport.sendMessage(chat.chatId, view.text, view.keyboard);
-  }
-}
-
-export async function handleDicePokerCallback(
-  transport: BotTransport,
-  chat: ChatState,
-  player: PlayerState,
-  callbackId: string,
-  messageId: string,
-  parts: string[]
-): Promise<void> {
-  const sub = parts[1];
-  const sid = parts[2];
-  const session = dicePokerSessions.get(sid);
-
-  if (!session || session.status !== 'reroll') {
-    await transport.answerCallback(callbackId, 'Этот раунд костяного покера уже завершён.', true);
-    return;
-  }
-  if (session.userId !== player.userId) {
-    await transport.answerCallback(callbackId, 'Не трогай чужие кубики!', true);
-    return;
-  }
-
-  if (sub === 'tog') {
-    const idx = parseInt(parts[3], 10);
-    if (idx >= 0 && idx < 5) {
-      session.rerollMarks[idx] = !session.rerollMarks[idx];
-    }
-    await transport.answerCallback(callbackId);
-    const view = buildDicePokerPayload(chat, player, session);
-    await transport.editMessage(chat.chatId, messageId, view.text, view.keyboard);
-    return;
-  }
-
-  if (sub === 'reroll') {
-    if (!session.rerollMarks.some(Boolean)) {
-      await transport.answerCallback(callbackId, 'Отметь хотя бы 1 кубик для переброса или жми «Засчитать»!', true);
-      return;
-    }
-    for (let i = 0; i < 5; i++) {
-      if (session.rerollMarks[i]) {
-        session.dice[i] = Math.floor(Math.random() * 6) + 1;
-      }
-    }
-    await transport.answerCallback(callbackId, 'Кости переброшены!');
-    await finishDicePoker(transport, chat, player, session, messageId);
-    return;
-  }
-
-  if (sub === 'keep') {
-    await transport.answerCallback(callbackId, 'Комбинация засчитана!');
-    await finishDicePoker(transport, chat, player, session, messageId);
-    return;
-  }
-
-  await transport.answerCallback(callbackId);
-}
-
-// =====================================
-// 6. PROTECTED MESSAGES & TTL SWEEPER (A3)
+// 5. PROTECTED MESSAGES & TTL SWEEPER (A3)
 // =====================================
 
 export function isNewGamesProtectedMsg(msgId: string): boolean {
@@ -1947,9 +1694,6 @@ export async function sweepExpiredNewGames(now = Date.now()): Promise<void> {
   for (const [id, s] of penaltySessions.entries()) {
     if (now - s.createdAt >= SOLO_TTL) penaltySessions.delete(id);
   }
-  for (const [id, s] of dicePokerSessions.entries()) {
-    if (now - s.createdAt >= SOLO_TTL) dicePokerSessions.delete(id);
-  }
 }
 
 registerRuntimeAdapter('newGames', {
@@ -1966,8 +1710,7 @@ registerRuntimeAdapter('newGames', {
       ...rest,
       transportSource: rest.transportSource || (_tr?.source ?? (rest.chatId.startsWith('sim-') ? 'simulator' : 'telegram'))
     })),
-    penaltySessions: Array.from(penaltySessions.values()),
-    dicePokerSessions: Array.from(dicePokerSessions.values())
+    penaltySessions: Array.from(penaltySessions.values())
   }),
   importState: (raw: any) => {
     for (const r of crashRounds.values()) {
@@ -1979,7 +1722,6 @@ registerRuntimeAdapter('newGames', {
     rpsSoloSessions.clear();
     rpsPvpLobbies.clear();
     penaltySessions.clear();
-    dicePokerSessions.clear();
 
     if (Array.isArray(raw?.crashRounds)) {
       for (const r of raw.crashRounds) {
@@ -2020,17 +1762,6 @@ registerRuntimeAdapter('newGames', {
           penaltySessions.set(s.id, {
             ...s,
             history: Array.isArray(s.history) ? s.history : []
-          });
-        }
-      }
-    }
-    if (Array.isArray(raw?.dicePokerSessions)) {
-      for (const s of raw.dicePokerSessions) {
-        if (s?.id && s.status === 'reroll') {
-          dicePokerSessions.set(s.id, {
-            ...s,
-            dice: Array.isArray(s.dice) ? s.dice : [1, 2, 3, 4, 5],
-            rerollMarks: Array.isArray(s.rerollMarks) ? s.rerollMarks : [false, false, false, false, false]
           });
         }
       }

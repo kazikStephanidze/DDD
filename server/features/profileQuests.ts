@@ -56,7 +56,6 @@ export const ACHIEVEMENTS_CATALOG: AchievementDef[] = [
   { id: 'alchemist', emoji: '⚗️', title: 'Алхимик общака', desc: 'Скрафтить талисман (контракт 5→1)' },
   { id: 'collector_unique', emoji: '🔴', title: 'Хранитель реликвии', desc: 'Получить Уникальный талисман (1/1)' },
   { id: 'philanthropist', emoji: '🤝', title: 'Кредитор чата', desc: 'Выдать P2P-займ участнику чата' },
-  { id: 'dice_shark', emoji: '🃏', title: 'Шулер костей', desc: 'Собрать Фулл-хаус, Каре или Покер на костях' },
   { id: 'oligarch_5k', emoji: '👑', title: 'Авторитет стола', desc: 'Накопить 5 000+ фантиков на балансе' }
 ];
 
@@ -89,7 +88,7 @@ const QUEST_TEMPLATES: { id: DailyQuestKind; title: string; target: number }[] =
   { id: 'crash_x2', title: 'Забрать в Краше на x2.00 или выше', target: 1 },
   { id: 'allin_or_dodep', title: 'Зарядить Ва-банк или Ласт додеп (x2)', target: 1 },
   { id: 'case_or_craft', title: 'Открыть кейс или скрафтить талисман', target: 1 },
-  { id: 'table_games', title: 'Сыграть 2 раза в Кости, Блэкджек или Покер', target: 2 },
+  { id: 'table_games', title: 'Сыграть 2 раза в Кости или Блэкджек', target: 2 },
   { id: 'skill_streak', title: 'Пройти 3+ этажа в Лесенке или забить 2+ в Пенальти', target: 1 },
   { id: 'social_pot_lot', title: 'Купить билет Лотереи или войти в Котёл', target: 1 }
 ];
@@ -153,7 +152,7 @@ export function recordGameOutcome(
   }
 
   recordQuestProgress(player, 'play_any', 1);
-  if (game === 'dice' || game === 'blackjack' || game === 'bjtable' || game === 'dicepoker') {
+  if (game === 'dice' || game === 'blackjack' || game === 'bjtable') {
     recordQuestProgress(player, 'table_games', 1);
   }
   if (opts?.isAllIn || opts?.isLastDodep) {
@@ -360,7 +359,8 @@ export function buildProfileView(chat: ChatState, player: PlayerState): { text: 
 
   // Achievements
   const unlockedIds = new Set(player.achievements || []);
-  const unlockedBadges = ACHIEVEMENTS_CATALOG.filter((a) => unlockedIds.has(a.id))
+  const unlockedDefs = ACHIEVEMENTS_CATALOG.filter((a) => unlockedIds.has(a.id));
+  const unlockedBadges = unlockedDefs
     .map((a) => `${a.emoji} ${a.title}`)
     .join(', ');
 
@@ -380,13 +380,13 @@ export function buildProfileView(chat: ChatState, player: PlayerState): { text: 
     `🏦 Доход от талисманов: +${formatHourlyRate(incomeSnap.hourlyRate)} 🪙/ч · накоплено ${incomeSnap.pendingCoins}/${incomeSnap.capCoins} 🪙 (макс. 12 ч)`,
     `📋 Дейлики сегодня: ${dqDone}/3 ${dq.rewardClaimed ? '(награда забрана ✅)' : ''}`,
     ``,
-    `🏅 Ачивки (${unlockedIds.size}/${ACHIEVEMENTS_CATALOG.length}):`,
+    `🏅 Ачивки (${unlockedDefs.length}/${ACHIEVEMENTS_CATALOG.length}):`,
     unlockedBadges ? unlockedBadges : 'Пока ни одной — пора крутить стол!'
   ];
 
   const kb: InlineKeyboard = [
     [
-      { text: `🏅 Все ачивки (${unlockedIds.size}/${ACHIEVEMENTS_CATALOG.length})`, callbackData: 'me:ach' },
+      { text: `🏅 Все ачивки (${unlockedDefs.length}/${ACHIEVEMENTS_CATALOG.length})`, callbackData: 'me:ach' },
       { text: `📋 Дейлики (${dqDone}/3)`, callbackData: 'dq:menu' }
     ],
     [

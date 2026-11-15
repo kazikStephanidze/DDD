@@ -83,6 +83,7 @@ import {
   sleep
 } from './engineShared.js';
 import {
+  ACHIEVEMENTS_CATALOG,
   buildProfileView,
   handleDailyQuestsCallback,
   handleProfileCallback,
@@ -93,12 +94,10 @@ import {
 import { handleLotteryCallback } from './features/lottery.js';
 import {
   handleCrashCallback,
-  handleDicePokerCallback,
   handlePenaltyCallback,
   handleRpsCallback,
   handleThimblesCallback,
   isNewGamesProtectedMsg,
-  startDicePokerGame,
   startOrJoinMultiplayerCrash,
   startPenaltyGame,
   startRpsMenu,
@@ -600,7 +599,7 @@ const GAME_GENRE_META: Record<GameGenre, { short: string; title: string; subtitl
   skill: {
     short: '🧠 Тактика',
     title: '🧠 Тактика и кэшаут',
-    subtitle: 'Мины 5×5, Лесенка додепа, Блэкджек 21, Hi-Lo, Пенальти и Покер на костях.'
+    subtitle: 'Мины 5×5, Лесенка додепа, Блэкджек 21, Hi-Lo и Пенальти.'
   }
 };
 
@@ -674,7 +673,7 @@ export function buildMainMenuText(
     return [
       `🪪 ПРОФИЛЬ, ДЕЙЛИКИ И ДОЛГИ${ownerBadge}`,
       balanceLine,
-      `📊 Игр: ${games} · Побед: ${wins} (${winrate}) · 🏅 Ачивок: ${achCount}/12`,
+      `📊 Игр: ${games} · Побед: ${wins} (${winrate}) · 🏅 Ачивок: ${achCount}/${ACHIEVEMENTS_CATALOG.length}`,
       `📋 Дейлики: ${dqDone}/3 · 🤝 Должен: ${owed} 🪙 · Выдано: ${lent} 🪙${openReq ? ` · 📣 Открытая заявка: ${openReq.principal} 🪙` : ''}`,
       incomeSnap && (incomeSnap.hourlyRate > 0 || incomeSnap.pendingCoins > 0)
         ? `🏦 Доход от талисманов: +${formatHourlyRate(incomeSnap.hourlyRate)} 🪙/ч · накоплено ${incomeSnap.pendingCoins}/${incomeSnap.capCoins} 🪙 (макс. 12 ч)`
@@ -766,9 +765,8 @@ export function buildMainMenuKeyboard(
         ],
         [
           { text: '⚽ Пенальти', callbackData: 'g:penalty' },
-          { text: '🎲 Покер на костях', callbackData: 'g:dicepoker' }
-        ],
-        [{ text: '↩️ Главное меню', callbackData: 'menu:home' }]
+          { text: '↩️ Главное меню', callbackData: 'menu:home' }
+        ]
       ];
     }
 
@@ -1307,7 +1305,7 @@ function isActiveSoloStepAction(parts: string[]): boolean {
   const action = parts[0];
   const sub = parts[1];
   if (action === 'mn') return sub !== 'cfg';
-  if (action === 'dc' || action === 'bj' || action === 'hl' || action === 'th' || action === 'pn' || action === 'dp') {
+  if (action === 'dc' || action === 'bj' || action === 'hl' || action === 'th' || action === 'pn') {
     return true;
   }
   if (action === 'ldr') return sub !== 'cfg';
@@ -2269,12 +2267,6 @@ export async function handleCallback(
     return;
   }
 
-  // Dice Poker ("Покер на костях")
-  if (action === 'dp') {
-    await handleDicePokerCallback(transport, chat, player, callbackId, messageId, parts);
-    return;
-  }
-
   // Evening Lottery ("Лотерея 20:55")
   if (action === 'lot') {
     await handleLotteryCallback(transport, chat, player, callbackId, messageId, parts);
@@ -2401,11 +2393,6 @@ async function startGameFlow(
 
   if (game === 'penalty') {
     await startPenaltyGame(transport, chat, player, stake, isLastDodep, messageId);
-    return;
-  }
-
-  if (game === 'dicepoker') {
-    await startDicePokerGame(transport, chat, player, stake, isLastDodep, messageId);
     return;
   }
 

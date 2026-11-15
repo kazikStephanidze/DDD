@@ -24,7 +24,6 @@ export type GameType =
   | 'thimbles'
   | 'rps'
   | 'penalty'
-  | 'dicepoker'
   | 'bjtable'
   | 'battleship'
   | 'chicken'
