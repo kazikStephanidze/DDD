@@ -378,6 +378,11 @@ export function SimulatorView({
                 {telegram.lastError}
               </div>
             )}
+            {telegram.mode === 'webhook' && !telegram.running && !telegram.lastError && (
+              <div className="text-amber-900 bg-amber-50 border border-amber-200 rounded-lg p-2 mt-2">
+                Webhook ещё не привязан к этому домену — нажмите «Установить Webhook (для Vercel)» ниже.
+              </div>
+            )}
             {webhookNote && (
               <div className="text-slate-700 bg-slate-50 border border-slate-200 rounded-lg p-2 mt-2">
                 {webhookNote}

@@ -2589,16 +2589,22 @@ async function startGameFlow(
       `🪳 ТАРАКАНЬИ БЕГА — ВЫБОР БОЙЦА`,
       `👤 Создаёт забег: ${playerLabel(chat, player)} | Ставка входа: ${stake} 🪙`,
       ``,
+      `У каждого бойца свой характер и честный икс:`,
+      `• 🪳 Виталя — Фаворит · x2.2 (шанс ~43%)`,
+      `• 🐀 Крысюк — Середняк · x3.2 (шанс ~30%)`,
+      `• 🦀 Олигарх — Тёмная лошадка · x5.0 (шанс ~19%)`,
+      `• 🐌 Тормоз — Андердог · x12 (шанс ~8%)`,
+      ``,
       `На кого ставишь и открываешь дорожку для всего чата?`
     ].join('\n');
     const kb: InlineKeyboard = [
       [
-        { text: '🪳 Виталя', callbackData: `rc:new:0:${stake}:${ldFlag}` },
-        { text: '🐌 Тормоз', callbackData: `rc:new:1:${stake}:${ldFlag}` }
+        { text: '🪳 Виталя · x2.2', callbackData: `rc:new:0:${stake}:${ldFlag}` },
+        { text: '🐀 Крысюк · x3.2', callbackData: `rc:new:2:${stake}:${ldFlag}` }
       ],
       [
-        { text: '🐀 Крысюк', callbackData: `rc:new:2:${stake}:${ldFlag}` },
-        { text: '🦀 Олигарх', callbackData: `rc:new:3:${stake}:${ldFlag}` }
+        { text: '🦀 Олигарх · x5.0', callbackData: `rc:new:3:${stake}:${ldFlag}` },
+        { text: '🐌 Тормоз · x12', callbackData: `rc:new:1:${stake}:${ldFlag}` }
       ],
       [{ text: '↩️ В меню', callbackData: 'menu' }]
     ];
@@ -4038,21 +4044,32 @@ function validateBorrowerEligibility(chat: ChatState, player: PlayerState, reque
 // =======================
 
 const RACE_RUNNERS = [
-  { emoji: '🪳', name: 'Виталя' },
-  { emoji: '🐌', name: 'Тормоз' },
-  { emoji: '🐀', name: 'Крысюк' },
-  { emoji: '🦀', name: 'Олигарх' }
+  { emoji: '🪳', name: 'Виталя', mult: 2.2, weight: 43, role: 'Фаворит' },
+  { emoji: '🐌', name: 'Тормоз', mult: 12, weight: 8, role: 'Андердог' },
+  { emoji: '🐀', name: 'Крысюк', mult: 3.2, weight: 30, role: 'Середняк' },
+  { emoji: '🦀', name: 'Олигарх', mult: 5.0, weight: 19, role: 'Тёмная лошадка' }
 ];
 
 const RACE_TRACK_LEN = 12;
+
+function pickWeightedRaceWinner(): number {
+  const total = RACE_RUNNERS.reduce((s, r) => s + r.weight, 0);
+  let roll = Math.random() * total;
+  for (let i = 0; i < RACE_RUNNERS.length; i++) {
+    roll -= RACE_RUNNERS[i].weight;
+    if (roll <= 0) return i;
+  }
+  return 0;
+}
 
 function renderRaceTracks(positions: number[], winnerLane?: number): string {
   return RACE_RUNNERS.map((runner, idx) => {
     const pos = Math.min(RACE_TRACK_LEN, positions[idx] || 0);
     const left = '➖'.repeat(pos);
     const right = '➖'.repeat(Math.max(0, RACE_TRACK_LEN - pos));
+    const multTag = Number.isInteger(runner.mult) ? `x${runner.mult}` : `x${runner.mult.toFixed(1)}`;
     const winMark = winnerLane === idx ? ' 🏆' : '';
-    return `${idx + 1}. ${runner.emoji} ${runner.name}: |${left}${runner.emoji}${right}🏁${winMark}`;
+    return `${idx + 1}. ${runner.emoji} ${runner.name} (${multTag}): |${left}${runner.emoji}${right}🏁${winMark}`;
   }).join('\n');
 }
 
@@ -4060,30 +4077,32 @@ function buildRaceLobbyText(chat: ChatState, lobby: RaceLobby): string {
   const pot = lobby.bets.reduce((s, b) => s + b.amount, 0);
   const betLines = lobby.bets.map((b) => {
     const r = RACE_RUNNERS[b.lane];
-    return `• ${b.firstName} → ${r.emoji} ${r.name} (${b.amount} 🪙)`;
+    const multTag = Number.isInteger(r.mult) ? `x${r.mult}` : `x${r.mult.toFixed(1)}`;
+    const potential = Math.round(b.amount * r.mult);
+    return `• ${b.firstName} → ${r.emoji} ${r.name} (${b.amount} 🪙 · ${multTag} → ${potential} 🪙)`;
   });
   return [
     `🪳 ТАРАКАНЬИ БЕГА — ЗАПИСЬ НА ЗАЕЗД`,
-    `🪙 Ставка: ${lobby.stake} 🪙 | 💰 Банк: ${pot} 🪙`,
+    `🪙 Ставка: ${lobby.stake} 🪙 | 💰 Поставлено в чате: ${pot} 🪙`,
     ``,
     renderRaceTracks(lobby.positions),
     ``,
     `📋 Ставки чата (${lobby.bets.length}):`,
     ...betLines,
     ``,
-    `Жми на своего таракана чтобы вписаться (соло-старт платит x3.8, в чате — делят весь банк)!`
+    `Жми на бойца чтобы вписаться! Каждый победитель получает честную выплату по коэффициенту своего таракана (от x2.2 до x12).`
   ].join('\n');
 }
 
 function buildRaceLobbyKeyboard(lobby: RaceLobby): InlineKeyboard {
   return [
     [
-      { text: `🪳 Виталя (${lobby.stake})`, callbackData: `rc:bet:${lobby.id}:0` },
-      { text: `🐌 Тормоз (${lobby.stake})`, callbackData: `rc:bet:${lobby.id}:1` }
+      { text: `🪳 Виталя x2.2 (${lobby.stake})`, callbackData: `rc:bet:${lobby.id}:0` },
+      { text: `🐀 Крысюк x3.2 (${lobby.stake})`, callbackData: `rc:bet:${lobby.id}:2` }
     ],
     [
-      { text: `🐀 Крысюк (${lobby.stake})`, callbackData: `rc:bet:${lobby.id}:2` },
-      { text: `🦀 Олигарх (${lobby.stake})`, callbackData: `rc:bet:${lobby.id}:3` }
+      { text: `🦀 Олигарх x5.0 (${lobby.stake})`, callbackData: `rc:bet:${lobby.id}:3` },
+      { text: `🐌 Тормоз x12 (${lobby.stake})`, callbackData: `rc:bet:${lobby.id}:1` }
     ],
     [
       { text: '🏁 Старт забега!', callbackData: `rc:go:${lobby.id}` },
@@ -4231,28 +4250,43 @@ async function handleRaceCallback(
 
     const pot = lobby.bets.reduce((s, b) => s + b.amount, 0);
     const stepDelay = transport.source === 'telegram' ? 1100 : 550;
+    const winnerLane = pickWeightedRaceWinner();
+    const winnerRunner = RACE_RUNNERS[winnerLane];
+    const winnerMultTag = Number.isInteger(winnerRunner.mult)
+      ? `x${winnerRunner.mult}`
+      : `x${winnerRunner.mult.toFixed(1)}`;
 
-    for (let tick = 0; tick < 6; tick++) {
+    for (let tick = 0; tick < 5; tick++) {
       for (let i = 0; i < 4; i++) {
-        const roll = Math.random();
-        const step = roll < 0.12 ? 0 : roll < 0.45 ? 1 : roll < 0.82 ? 2 : 3;
-        lobby.positions[i] = Math.min(RACE_TRACK_LEN, lobby.positions[i] + step);
+        if (i === winnerLane) {
+          // Winner keeps competitive pace early and surges cleanly on later ticks
+          const step = tick < 2 ? (Math.random() < 0.5 ? 2 : 3) : tick === 4 ? 4 : 3;
+          lobby.positions[i] = Math.min(RACE_TRACK_LEN - (tick < 4 ? 1 : 0), lobby.positions[i] + step);
+        } else {
+          // Non-winners cap out at 11 before finish so the weighted winner always takes 1st cleanly
+          const roll = Math.random();
+          const step = tick >= 3 ? (roll < 0.45 ? 0 : 1) : roll < 0.15 ? 0 : roll < 0.5 ? 1 : roll < 0.85 ? 2 : 3;
+          lobby.positions[i] = Math.min(RACE_TRACK_LEN - 1, lobby.positions[i] + step);
+        }
       }
 
-      const maxPos = Math.max(...lobby.positions);
-      const finished = maxPos >= RACE_TRACK_LEN;
-      if (finished || tick === 5) break;
+      if (tick === 4) break;
+
+      const turboNote =
+        tick === 3 && winnerLane === 1
+          ? `🚀 НИТРО-РЫВОК! 🐌 Тормоз (x12) включил форсаж и пошёл на обгон!`
+          : `🎙 ${nextPhrase(chat, 'raceStepQuotes')}`;
 
       await transport.editMessage(
         chat.chatId,
         messageId,
         [
           `🪳 ТАРАКАНЬИ БЕГА — В ПУТИ!`,
-          `💰 Банк: ${pot} 🪙 | Участников: ${lobby.bets.length}`,
+          `💰 В банке: ${pot} 🪙 | Участников: ${lobby.bets.length}`,
           ``,
           renderRaceTracks(lobby.positions),
           ``,
-          `🎙 ${nextPhrase(chat, 'raceStepQuotes')}`
+          turboNote
         ].join('\n'),
         undefined,
         { isAnimation: true }
@@ -4260,15 +4294,10 @@ async function handleRaceCallback(
       await sleep(stepDelay);
     }
 
-    const topPos = Math.max(...lobby.positions);
-    const topLanes = [0, 1, 2, 3].filter((idx) => lobby.positions[idx] === topPos);
-    const winnerLane = topLanes[Math.floor(Math.random() * topLanes.length)];
     lobby.positions[winnerLane] = RACE_TRACK_LEN;
     lobby.status = 'finished';
 
-    const winnerRunner = RACE_RUNNERS[winnerLane];
     const winners = lobby.bets.filter((b) => b.lane === winnerLane);
-    const isHousePay = lobby.bets.length === 1 || winners.length === lobby.bets.length;
 
     const payoutLines: string[] = [];
     const autoCollectQueue: { player: PlayerState; net: number }[] = [];
@@ -4281,7 +4310,7 @@ async function handleRaceCallback(
       ps.lastGameType = 'races';
 
       if (b.lane === winnerLane) {
-        const payout = isHousePay ? Math.round(b.amount * 3.8) : Math.floor(pot / winners.length);
+        const payout = Math.round(b.amount * winnerRunner.mult);
         const net = payout - b.amount;
         ps.balance += payout;
         ps.stats.totalWon += Math.max(0, net);
@@ -4291,14 +4320,17 @@ async function handleRaceCallback(
         ps.lastActionWasLoss = false;
         ps.lastActionWasLastDodep = false;
         recordGameOutcome(chat, ps, 'races', net, { isLastDodep: b.isLastDodep });
-        payoutLines.push(`🏆 ${playerLabel(chat, ps)} забирает +${payout} 🪙 (баланс: ${ps.balance})`);
+        payoutLines.push(
+          `🏆 ${playerLabel(chat, ps)} забирает +${payout} 🪙 (${winnerMultTag}, баланс: ${ps.balance})`
+        );
         if (net > 0) autoCollectQueue.push({ player: ps, net });
       } else {
+        const picked = RACE_RUNNERS[b.lane];
         ps.stats.totalLost += b.amount;
         ps.lastActionWasLoss = true;
         ps.lastActionWasLastDodep = false;
         recordGameOutcome(chat, ps, 'races', -b.amount, { isLastDodep: b.isLastDodep });
-        payoutLines.push(`🥀 ${playerLabel(chat, ps)} мимо (-${b.amount} 🪙)`);
+        payoutLines.push(`🥀 ${playerLabel(chat, ps)} мимо (${picked.emoji} ${picked.name}, -${b.amount} 🪙)`);
         if (ps.balance === 0) zeroOfferQueue.push(ps);
       }
     }
@@ -4309,14 +4341,14 @@ async function handleRaceCallback(
       chatId: chat.chatId,
       chatTitle: chat.title,
       userName: winners.length > 0 ? winners.map((w) => w.firstName).join(', ') : 'Дядя Деп',
-      event: `Бега: победил ${winnerRunner.emoji} ${winnerRunner.name}`,
-      detail: `Банк ${pot} 🪙 · победителей: ${winners.length}/${lobby.bets.length}`
+      event: `Бега: победил ${winnerRunner.emoji} ${winnerRunner.name} (${winnerMultTag})`,
+      detail: `Ставок на ${pot} 🪙 · победителей: ${winners.length}/${lobby.bets.length}`
     });
 
     const comment = winners.length > 0 ? nextPhrase(chat, 'raceWin') : nextPhrase(chat, 'raceLoss');
     const finalMsg = [
       `🏁 ТАРАКАНЬИ БЕГА — ФИНИШ!`,
-      `🏆 Победитель заезда: ${winnerRunner.emoji} ${winnerRunner.name}!`,
+      `🏆 Победитель заезда: ${winnerRunner.emoji} ${winnerRunner.name} (${winnerMultTag})!`,
       ``,
       renderRaceTracks(lobby.positions, winnerLane),
       ``,

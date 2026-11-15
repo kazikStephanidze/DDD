@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { isFirebaseConfigured, rtdbGet, rtdbPatch } from './firebaseDb.js';
+import { isFirebaseConfigured, rtdbGet, rtdbPatch, rtdbPut } from './firebaseDb.js';
 import {
   applyRuntimeSnapshot,
   clearRuntimeDirty,
@@ -183,6 +183,7 @@ export interface ChatState {
   lastEveningReportDate?: string;
   lastBlitzAt?: number;
   usedPhraseKeys?: string[];
+  usedPhraseCount?: number;
   usedQuoteHashes: string[];
   usedHoroscopeHashes: string[];
   loans?: LoanRecord[];
@@ -246,21 +247,62 @@ let lastFirebaseLoadAt = 0;
 let lastFirebaseSyncAt: number | null = null;
 let lastFirebaseError: string | null = null;
 let lastSavedMetaHash = '';
-let lastSavedChatsHash = '';
-let lastSavedLogsHash = '';
 let lastSavedRuntimeHash = '';
+const lastSavedChatHashes = new Map<string, string>();
+const lastSavedPhraseArchiveHashes = new Map<string, string>();
+let pendingLogsToArchive: BotLogEntry[] = [];
 let dbDirty = false;
+const inFlightLoads = new Map<string, Promise<DatabaseSchema>>();
+const processedUpdateIds = new Map<number, number>();
+const UPDATE_DEDUP_TTL_MS = 15 * 60 * 1000;
+
+interface FirebaseStoredMeta {
+  timezone?: string;
+  telegramToken?: string | null;
+  localPollingPaused?: boolean;
+  trackedBotMessages?: TrackedBotMessage[];
+}
+
+interface FirebasePhraseArchive {
+  usedPhraseKeys?: string[];
+  usedQuoteHashes?: string[];
+  usedHoroscopeHashes?: string[];
+}
 
 interface FirebaseStoredState {
-  meta?: {
-    timezone?: string;
-    telegramToken?: string;
-    localPollingPaused?: boolean;
-    trackedBotMessages?: TrackedBotMessage[];
-  };
+  meta?: FirebaseStoredMeta;
   chats?: Record<string, ChatState>;
   logs?: BotLogEntry[];
+  logsArchive?: Record<string, BotLogEntry>;
+  phraseArchive?: Record<string, FirebasePhraseArchive>;
   runtime?: Record<string, unknown>;
+}
+
+function toRtdbKey(raw: string): string {
+  return raw.replace(/[.$#[\]/]/g, '_');
+}
+
+function stripChatPhrases(chat: ChatState): ChatState {
+  const {
+    usedPhraseKeys,
+    usedQuoteHashes: _uqh,
+    usedHoroscopeHashes: _uhh,
+    ...hot
+  } = chat;
+  return {
+    ...hot,
+    usedPhraseCount: Math.max(chat.usedPhraseCount || 0, Array.isArray(usedPhraseKeys) ? usedPhraseKeys.length : 0),
+    usedQuoteHashes: [],
+    usedHoroscopeHashes: []
+  };
+}
+
+function extractChatPhraseArchive(chat: ChatState): FirebasePhraseArchive {
+  return {
+    usedPhraseKeys: chat.usedPhraseKeys || [],
+    usedQuoteHashes: chat.usedQuoteHashes || [],
+    usedHoroscopeHashes: chat.usedHoroscopeHashes || []
+  };
 }
 
 function ensureDataDir() {
@@ -270,66 +312,87 @@ function ensureDataDir() {
   }
 }
 
-function normalizeDbSchema(target: DatabaseSchema): void {
-  ensureSimulatorSeedOn(target);
-  for (const chat of Object.values(target.chats)) {
-    if (!chat.loans) chat.loans = [];
-    if (!chat.loanRequests) chat.loanRequests = [];
-    if (!chat.uniqueTalismans) chat.uniqueTalismans = {};
-    if (!chat.usedPhraseKeys) chat.usedPhraseKeys = [];
-    if (!chat.usedQuoteHashes) chat.usedQuoteHashes = [];
-    if (!chat.usedHoroscopeHashes) chat.usedHoroscopeHashes = [];
-    if (!chat.lottery) chat.lottery = { date: '', tickets: [], lastDrawnDate: '' };
-    if (!chat.lottery.tickets) chat.lottery.tickets = [];
-    if (chat.lastEveningReportDate === undefined) chat.lastEveningReportDate = '';
-    if (chat.lastBlitzAt === undefined) chat.lastBlitzAt = 0;
-    if (!chat.players) chat.players = {};
-    for (const p of Object.values(chat.players)) {
-      if (!p.talismans) p.talismans = [];
-      if (p.equippedTalismanId === undefined) p.equippedTalismanId = null;
-      if (p.talismanIncomeAccrued === undefined) p.talismanIncomeAccrued = 0;
-      if (p.lastTalismanIncomeAt === undefined) p.lastTalismanIncomeAt = Date.now();
-      if (!p.stats) {
-        p.stats = {
-          totalLost: 0,
-          totalWon: 0,
-          gamesPlayed: 0,
-          maxCrashMultiplier: 0,
-          lastDodepWins: 0
-        };
-      }
-      if (!p.dailyBaseline) {
-        p.dailyBaseline = createBaselineFromPlayer(p);
-      }
-      if (!p.achievements) p.achievements = [];
-      if (p.dailyQuests === undefined) p.dailyQuests = null;
-      if (!p.stats.gameCounts) p.stats.gameCounts = {};
+function normalizeSingleChat(chat: ChatState): void {
+  if (!chat.loans) chat.loans = [];
+  if (!chat.loanRequests) chat.loanRequests = [];
+  if (!chat.uniqueTalismans) chat.uniqueTalismans = {};
+  if (!chat.usedPhraseKeys) chat.usedPhraseKeys = [];
+  if (chat.usedPhraseCount === undefined) {
+    chat.usedPhraseCount = chat.usedPhraseKeys.length;
+  } else if (chat.usedPhraseKeys.length > chat.usedPhraseCount) {
+    chat.usedPhraseCount = chat.usedPhraseKeys.length;
+  }
+  if (!chat.usedQuoteHashes) chat.usedQuoteHashes = [];
+  if (!chat.usedHoroscopeHashes) chat.usedHoroscopeHashes = [];
+  if (!chat.lottery) chat.lottery = { date: '', tickets: [], lastDrawnDate: '' };
+  if (!chat.lottery.tickets) chat.lottery.tickets = [];
+  if (chat.lastEveningReportDate === undefined) chat.lastEveningReportDate = '';
+  if (chat.lastBlitzAt === undefined) chat.lastBlitzAt = 0;
+  if (!chat.players) chat.players = {};
+  for (const p of Object.values(chat.players)) {
+    if (!p.talismans) p.talismans = [];
+    if (p.equippedTalismanId === undefined) p.equippedTalismanId = null;
+    if (p.talismanIncomeAccrued === undefined) p.talismanIncomeAccrued = 0;
+    if (p.lastTalismanIncomeAt === undefined) p.lastTalismanIncomeAt = Date.now();
+    if (!p.stats) {
+      p.stats = {
+        totalLost: 0,
+        totalWon: 0,
+        gamesPlayed: 0,
+        maxCrashMultiplier: 0,
+        lastDodepWins: 0
+      };
+    }
+    if (!p.dailyBaseline) {
+      p.dailyBaseline = createBaselineFromPlayer(p);
+    }
+    if (!p.achievements) p.achievements = [];
+    if (p.dailyQuests === undefined) p.dailyQuests = null;
+    if (!p.stats.gameCounts) p.stats.gameCounts = {};
+  }
+}
+
+function normalizeDbSchema(target: DatabaseSchema, onlyChatId?: string): void {
+  if (!onlyChatId || onlyChatId === 'sim-chat-1') {
+    ensureSimulatorSeedOn(target);
+  }
+  if (onlyChatId) {
+    if (target.chats[onlyChatId]) {
+      normalizeSingleChat(target.chats[onlyChatId]);
+    }
+  } else {
+    for (const chat of Object.values(target.chats)) {
+      normalizeSingleChat(chat);
     }
   }
   if (!target.trackedBotMessages) target.trackedBotMessages = [];
 }
 
-function computeHashes(): { meta: string; chats: string; logs: string; runtime: string } {
-  const metaObj = {
+function computeMetaHash(): string {
+  return JSON.stringify({
     timezone: db.timezone,
     telegramToken: db.telegramToken || null,
     localPollingPaused: Boolean(db.localPollingPaused),
     trackedBotMessages: db.trackedBotMessages || []
-  };
-  return {
-    meta: JSON.stringify(metaObj),
-    chats: JSON.stringify(db.chats),
-    logs: JSON.stringify(logs.slice(0, 80)),
-    runtime: JSON.stringify(collectRuntimeSnapshot())
-  };
+  });
 }
 
-function updateSavedHashes(): void {
-  const h = computeHashes();
-  lastSavedMetaHash = h.meta;
-  lastSavedChatsHash = h.chats;
-  lastSavedLogsHash = h.logs;
-  lastSavedRuntimeHash = h.runtime;
+function computeRuntimeHash(): string {
+  return JSON.stringify(collectRuntimeSnapshot());
+}
+
+function updateSavedHashes(options?: { targetChatId?: string; markPhraseArchive?: boolean }): void {
+  lastSavedMetaHash = computeMetaHash();
+  lastSavedRuntimeHash = computeRuntimeHash();
+  const chats = options?.targetChatId
+    ? [db.chats[options.targetChatId]].filter(Boolean)
+    : Object.values(db.chats);
+  for (const c of chats) {
+    lastSavedChatHashes.set(c.chatId, JSON.stringify(stripChatPhrases(c)));
+    if (options?.markPhraseArchive) {
+      lastSavedPhraseArchiveHashes.set(c.chatId, JSON.stringify(extractChatPhraseArchive(c)));
+    }
+  }
 }
 
 export function loadDatabase(): DatabaseSchema {
@@ -364,13 +427,16 @@ export function loadDatabase(): DatabaseSchema {
 export async function ensureDatabaseLoaded(options?: {
   forceRemote?: boolean;
   minIntervalMs?: number;
+  targetChatId?: string;
+  includePhraseArchive?: boolean;
+  includeLogs?: boolean;
 }): Promise<DatabaseSchema> {
   if (!firebaseInitialized && !isServerlessRuntime()) {
     loadDatabase();
   }
 
   if (!isFirebaseConfigured()) {
-    normalizeDbSchema(db);
+    normalizeDbSchema(db, options?.targetChatId);
     firebaseInitialized = true;
     return db;
   }
@@ -386,59 +452,176 @@ export async function ensureDatabaseLoaded(options?: {
     return db;
   }
 
-  try {
-    const remote = await rtdbGet<FirebaseStoredState>('depBot');
-    lastFirebaseLoadAt = Date.now();
-    lastFirebaseSyncAt = lastFirebaseLoadAt;
-    lastFirebaseError = null;
-
-    if (remote && remote.chats && Object.keys(remote.chats).length > 0) {
-      const envToken = (process.env.TELEGRAM_BOT_TOKEN || '').trim() || undefined;
-      db = {
-        chats: remote.chats || {},
-        timezone: remote.meta?.timezone || process.env.BOT_TIMEZONE || 'Europe/Minsk',
-        telegramToken: envToken || remote.meta?.telegramToken || db.telegramToken,
-        localPollingPaused: Boolean(remote.meta?.localPollingPaused),
-        trackedBotMessages: remote.meta?.trackedBotMessages || []
-      };
-      normalizeDbSchema(db);
-
-      if (Array.isArray(remote.logs)) {
-        logs = remote.logs.slice(0, 80);
-      }
-      if (remote.runtime) {
-        applyRuntimeSnapshot(remote.runtime);
-      }
-      updateSavedHashes();
-      dbDirty = false;
-      clearRuntimeDirty();
-    } else {
-      // First-time seed into Firebase RTDB from local DB or fresh simulator seed
-      normalizeDbSchema(db);
-      firebaseInitialized = true;
-      await flushDatabaseToFirebase(true);
-    }
-    firebaseInitialized = true;
-  } catch (err: any) {
-    lastFirebaseError = err?.message || 'Ошибка чтения Firebase RTDB';
-    console.error('[Firebase RTDB] Load error:', lastFirebaseError);
-    normalizeDbSchema(db);
-    firebaseInitialized = true;
+  const scopeKey = options?.targetChatId
+    ? `chat:${options.targetChatId}:${options.includePhraseArchive !== false ? 1 : 0}`
+    : `full:${options?.includePhraseArchive ? 1 : 0}:${options?.includeLogs !== false ? 1 : 0}`;
+  const existingFlight = inFlightLoads.get(scopeKey);
+  if (existingFlight) {
+    return existingFlight;
   }
-  return db;
+
+  const promise = (async () => {
+    try {
+      const envToken = (process.env.TELEGRAM_BOT_TOKEN || '').trim() || undefined;
+
+      if (options?.targetChatId) {
+        // Hot per-chat targeted load (skips other chats and archival logs)
+        const targetId = options.targetChatId;
+        const chatKey = toRtdbKey(targetId);
+        const wantArchive = options.includePhraseArchive !== false;
+
+        const [meta, remoteChat, remoteArchive, remoteRuntime] = await Promise.all([
+          rtdbGet<FirebaseStoredMeta>('depBot/meta'),
+          rtdbGet<ChatState>(`depBot/chats/${chatKey}`),
+          wantArchive ? rtdbGet<FirebasePhraseArchive>(`depBot/phraseArchive/${chatKey}`) : Promise.resolve(null),
+          rtdbGet<Record<string, unknown>>('depBot/runtime')
+        ]);
+
+        lastFirebaseLoadAt = Date.now();
+        lastFirebaseSyncAt = lastFirebaseLoadAt;
+        lastFirebaseError = null;
+
+        if (meta) {
+          db.timezone = meta.timezone || process.env.BOT_TIMEZONE || 'Europe/Minsk';
+          db.telegramToken = envToken || meta.telegramToken || db.telegramToken;
+          db.localPollingPaused = Boolean(meta.localPollingPaused);
+          db.trackedBotMessages = meta.trackedBotMessages || [];
+        } else {
+          db.telegramToken = envToken || db.telegramToken;
+        }
+
+        if (remoteChat) {
+          if (remoteArchive) {
+            remoteChat.usedPhraseKeys = remoteArchive.usedPhraseKeys || [];
+            remoteChat.usedQuoteHashes = remoteArchive.usedQuoteHashes || [];
+            remoteChat.usedHoroscopeHashes = remoteArchive.usedHoroscopeHashes || [];
+          } else if (!remoteChat.usedPhraseKeys && db.chats[targetId]?.usedPhraseKeys) {
+            remoteChat.usedPhraseKeys = db.chats[targetId].usedPhraseKeys;
+            remoteChat.usedQuoteHashes = db.chats[targetId].usedQuoteHashes || [];
+            remoteChat.usedHoroscopeHashes = db.chats[targetId].usedHoroscopeHashes || [];
+          }
+          db.chats[targetId] = remoteChat;
+          normalizeDbSchema(db, targetId);
+        } else if (meta) {
+          // Brand-new chat not yet in Firebase; keep existing or create lazily on command
+          normalizeDbSchema(db, targetId);
+        } else {
+          // Completely empty DB in Firebase — seed once
+          normalizeDbSchema(db);
+          firebaseInitialized = true;
+          await flushDatabaseToFirebase(true);
+        }
+
+        if (remoteRuntime) {
+          applyRuntimeSnapshot(remoteRuntime);
+        }
+        updateSavedHashes({ targetChatId: targetId, markPhraseArchive: wantArchive });
+        dbDirty = false;
+        clearRuntimeDirty();
+        firebaseInitialized = true;
+        return db;
+      }
+
+      // Full load (UI status, cron broadcasts, startup)
+      const wantLogs = options?.includeLogs !== false;
+      const wantAllArchives = Boolean(options?.includePhraseArchive);
+
+      const [meta, remoteChats, remoteRuntime, remoteLogsArchive, remoteAllArchives] = await Promise.all([
+        rtdbGet<FirebaseStoredMeta>('depBot/meta'),
+        rtdbGet<Record<string, ChatState>>('depBot/chats'),
+        rtdbGet<Record<string, unknown>>('depBot/runtime'),
+        wantLogs ? rtdbGet<Record<string, BotLogEntry>>('depBot/logsArchive') : Promise.resolve(null),
+        wantAllArchives
+          ? rtdbGet<Record<string, FirebasePhraseArchive>>('depBot/phraseArchive')
+          : Promise.resolve(null)
+      ]);
+
+      lastFirebaseLoadAt = Date.now();
+      lastFirebaseSyncAt = lastFirebaseLoadAt;
+      lastFirebaseError = null;
+
+      if (remoteChats && Object.keys(remoteChats).length > 0) {
+        const mergedChats: Record<string, ChatState> = {};
+        for (const [key, chatObj] of Object.entries(remoteChats)) {
+          if (!chatObj) continue;
+          const chatId = chatObj.chatId || key;
+          const archive = remoteAllArchives?.[key] || remoteAllArchives?.[toRtdbKey(chatId)];
+          if (archive) {
+            chatObj.usedPhraseKeys = archive.usedPhraseKeys || [];
+            chatObj.usedQuoteHashes = archive.usedQuoteHashes || [];
+            chatObj.usedHoroscopeHashes = archive.usedHoroscopeHashes || [];
+          } else if (!chatObj.usedPhraseKeys && db.chats[chatId]?.usedPhraseKeys) {
+            chatObj.usedPhraseKeys = db.chats[chatId].usedPhraseKeys;
+            chatObj.usedQuoteHashes = db.chats[chatId].usedQuoteHashes || [];
+            chatObj.usedHoroscopeHashes = db.chats[chatId].usedHoroscopeHashes || [];
+          }
+          mergedChats[chatId] = chatObj;
+        }
+
+        db = {
+          chats: mergedChats,
+          timezone: meta?.timezone || process.env.BOT_TIMEZONE || 'Europe/Minsk',
+          telegramToken: envToken || meta?.telegramToken || db.telegramToken,
+          localPollingPaused: Boolean(meta?.localPollingPaused),
+          trackedBotMessages: meta?.trackedBotMessages || []
+        };
+        normalizeDbSchema(db);
+
+        if (wantLogs) {
+          if (remoteLogsArchive && typeof remoteLogsArchive === 'object') {
+            logs = Object.values(remoteLogsArchive)
+              .filter((item): item is BotLogEntry => Boolean(item && typeof item.timestamp === 'number'))
+              .sort((a, b) => b.timestamp - a.timestamp)
+              .slice(0, 80);
+          } else {
+            const legacyLogs = await rtdbGet<BotLogEntry[]>('depBot/logs').catch(() => null);
+            if (Array.isArray(legacyLogs)) {
+              logs = legacyLogs.slice(0, 80);
+            }
+          }
+        }
+
+        if (remoteRuntime) {
+          applyRuntimeSnapshot(remoteRuntime);
+        }
+        updateSavedHashes({ markPhraseArchive: wantAllArchives });
+        dbDirty = false;
+        clearRuntimeDirty();
+      } else {
+        // First-time seed into Firebase RTDB from local DB or fresh simulator seed
+        normalizeDbSchema(db);
+        firebaseInitialized = true;
+        await flushDatabaseToFirebase(true);
+      }
+      firebaseInitialized = true;
+    } catch (err: any) {
+      lastFirebaseError = err?.message || 'Ошибка чтения Firebase RTDB';
+      console.error('[Firebase RTDB] Load error:', lastFirebaseError);
+      normalizeDbSchema(db, options?.targetChatId);
+      firebaseInitialized = true;
+    } finally {
+      inFlightLoads.delete(scopeKey);
+    }
+    return db;
+  })();
+
+  inFlightLoads.set(scopeKey, promise);
+  return promise;
 }
 
-export async function flushDatabaseToFirebase(force = false): Promise<void> {
+export async function flushDatabaseToFirebase(force = false, targetChatId?: string): Promise<void> {
   if (!isFirebaseConfigured()) {
     dbDirty = false;
+    pendingLogsToArchive = [];
     clearRuntimeDirty();
     return;
   }
 
-  const hashes = computeHashes();
+  const metaHash = computeMetaHash();
+  const runtimeHash = computeRuntimeHash();
   const patch: Record<string, unknown> = {};
 
-  if (force || hashes.meta !== lastSavedMetaHash) {
+  if (force || metaHash !== lastSavedMetaHash) {
     patch.meta = {
       timezone: db.timezone,
       telegramToken: db.telegramToken || null,
@@ -446,13 +629,46 @@ export async function flushDatabaseToFirebase(force = false): Promise<void> {
       trackedBotMessages: db.trackedBotMessages || []
     };
   }
-  if (force || hashes.chats !== lastSavedChatsHash) {
-    patch.chats = db.chats;
+
+  // Per-chat delta sync: only write chats whose hot state or phrase archive actually changed
+  const chatsToCheck = targetChatId
+    ? [db.chats[targetChatId]].filter(Boolean)
+    : Object.values(db.chats);
+
+  const pendingChatHashes = new Map<string, string>();
+  const pendingArchiveHashes = new Map<string, string>();
+
+  for (const chat of chatsToCheck) {
+    const key = toRtdbKey(chat.chatId);
+    const hotChat = stripChatPhrases(chat);
+    const hotHash = JSON.stringify(hotChat);
+    if (force || hotHash !== lastSavedChatHashes.get(chat.chatId)) {
+      patch[`chats/${key}`] = hotChat;
+      pendingChatHashes.set(chat.chatId, hotHash);
+    }
+
+    const archiveObj = extractChatPhraseArchive(chat);
+    const hasArchiveData =
+      (archiveObj.usedPhraseKeys?.length || 0) > 0 ||
+      (archiveObj.usedQuoteHashes?.length || 0) > 0 ||
+      (archiveObj.usedHoroscopeHashes?.length || 0) > 0;
+    if (hasArchiveData) {
+      const archiveHash = JSON.stringify(archiveObj);
+      if (force || archiveHash !== lastSavedPhraseArchiveHashes.get(chat.chatId)) {
+        patch[`phraseArchive/${key}`] = archiveObj;
+        pendingArchiveHashes.set(chat.chatId, archiveHash);
+      }
+    }
   }
-  if (force || hashes.logs !== lastSavedLogsHash) {
-    patch.logs = logs.slice(0, 80);
+
+  // Archival logs: append only newly emitted logs without reading or overwriting existing archive
+  const logsToFlush = force && pendingLogsToArchive.length === 0 ? logs.slice(0, 40) : pendingLogsToArchive;
+  for (const entry of logsToFlush) {
+    const logKey = toRtdbKey(entry.id);
+    patch[`logsArchive/${logKey}`] = entry;
   }
-  if (force || isRuntimeDirty() || hashes.runtime !== lastSavedRuntimeHash) {
+
+  if (force || isRuntimeDirty() || runtimeHash !== lastSavedRuntimeHash) {
     patch.runtime = collectRuntimeSnapshot();
   }
 
@@ -464,10 +680,15 @@ export async function flushDatabaseToFirebase(force = false): Promise<void> {
 
   try {
     await rtdbPatch('depBot', patch);
-    lastSavedMetaHash = hashes.meta;
-    lastSavedChatsHash = hashes.chats;
-    lastSavedLogsHash = hashes.logs;
-    lastSavedRuntimeHash = hashes.runtime;
+    lastSavedMetaHash = metaHash;
+    lastSavedRuntimeHash = runtimeHash;
+    for (const [cid, h] of pendingChatHashes.entries()) {
+      lastSavedChatHashes.set(cid, h);
+    }
+    for (const [cid, h] of pendingArchiveHashes.entries()) {
+      lastSavedPhraseArchiveHashes.set(cid, h);
+    }
+    pendingLogsToArchive = [];
     lastFirebaseSyncAt = Date.now();
     lastFirebaseError = null;
     dbDirty = false;
@@ -475,6 +696,82 @@ export async function flushDatabaseToFirebase(force = false): Promise<void> {
   } catch (err: any) {
     lastFirebaseError = err?.message || 'Ошибка записи в Firebase RTDB';
     console.error('[Firebase RTDB] Save error:', lastFirebaseError);
+  }
+}
+
+export async function claimTelegramUpdateId(updateId: number): Promise<boolean> {
+  const now = Date.now();
+  const cachedAt = processedUpdateIds.get(updateId);
+  if (cachedAt && now - cachedAt < UPDATE_DEDUP_TTL_MS) {
+    return false;
+  }
+
+  if (processedUpdateIds.size > 500) {
+    for (const [id, ts] of processedUpdateIds.entries()) {
+      if (now - ts >= UPDATE_DEDUP_TTL_MS || processedUpdateIds.size > 400) {
+        processedUpdateIds.delete(id);
+      } else {
+        break;
+      }
+    }
+  }
+
+  if (!isFirebaseConfigured()) {
+    processedUpdateIds.set(updateId, now);
+    return true;
+  }
+
+  try {
+    const existing = await rtdbGet<number>(`depBot/webhookDedup/${updateId}`);
+    if (typeof existing === 'number' && now - existing < UPDATE_DEDUP_TTL_MS) {
+      processedUpdateIds.set(updateId, existing);
+      return false;
+    }
+    await rtdbPut(`depBot/webhookDedup/${updateId}`, now);
+    processedUpdateIds.set(updateId, now);
+    return true;
+  } catch (err: any) {
+    console.warn('[Webhook Dedup] RTDB check failed, proceeding open:', err?.message || err);
+    processedUpdateIds.set(updateId, now);
+    return true;
+  }
+}
+
+export async function pruneFirebaseArchives(): Promise<void> {
+  if (!isFirebaseConfigured()) return;
+  const now = Date.now();
+  try {
+    const [dedupMap, logsMap] = await Promise.all([
+      rtdbGet<Record<string, number>>('depBot/webhookDedup'),
+      rtdbGet<Record<string, BotLogEntry>>('depBot/logsArchive')
+    ]);
+
+    const dedupPatch: Record<string, null> = {};
+    if (dedupMap && typeof dedupMap === 'object') {
+      for (const [id, ts] of Object.entries(dedupMap)) {
+        if (typeof ts !== 'number' || now - ts > 30 * 60 * 1000) {
+          dedupPatch[id] = null;
+        }
+      }
+      if (Object.keys(dedupPatch).length > 0) {
+        await rtdbPatch('depBot/webhookDedup', dedupPatch);
+      }
+    }
+
+    if (logsMap && typeof logsMap === 'object') {
+      const entries = Object.entries(logsMap).sort(
+        (a, b) => (b[1]?.timestamp || 0) - (a[1]?.timestamp || 0)
+      );
+      if (entries.length > 80) {
+        const logsPatch: Record<string, null> = {};
+        for (const [id] of entries.slice(80)) {
+          logsPatch[id] = null;
+        }
+        await rtdbPatch('depBot/logsArchive', logsPatch);
+      }
+    }
+  } catch (err: any) {
+    console.warn('[Archive Prune] Skipped:', err?.message || err);
   }
 }
 
@@ -747,17 +1044,23 @@ export function recordUsedPhraseKey(chat: ChatState, key: string) {
   if (chat.usedPhraseKeys.length > 2600) {
     chat.usedPhraseKeys = chat.usedPhraseKeys.slice(-2200);
   }
+  chat.usedPhraseCount = Math.max(chat.usedPhraseCount || 0, chat.usedPhraseKeys.length);
   scheduleSave();
 }
 
 export function addBotLog(entry: Omit<BotLogEntry, 'id' | 'timestamp'>) {
-  logs.unshift({
+  const fullEntry: BotLogEntry = {
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     timestamp: Date.now(),
     ...entry
-  });
+  };
+  logs.unshift(fullEntry);
   if (logs.length > 150) {
     logs = logs.slice(0, 150);
+  }
+  pendingLogsToArchive.push(fullEntry);
+  if (pendingLogsToArchive.length > 40) {
+    pendingLogsToArchive = pendingLogsToArchive.slice(-40);
   }
 }
 

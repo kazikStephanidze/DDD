@@ -25,6 +25,7 @@ import {
 } from './runtimeRegistry.js';
 import {
   BOT_MESSAGE_TTL_MS,
+  claimTelegramUpdateId,
   ensureDatabaseLoaded,
   flushDatabaseToFirebase,
   getBotLogs,
@@ -32,6 +33,7 @@ import {
   getFirebaseStatus,
   getOrCreateChat,
   getZonedDateTimeParts,
+  pruneFirebaseArchives,
   scheduleSave,
   setLocalPollingPaused,
   setTelegramToken,
@@ -249,7 +251,7 @@ export function createExpressApp(): express.Express {
 
   app.get('/api/status', async (_req, res) => {
     try {
-      await ensureDatabaseLoaded({ minIntervalMs: 2000 });
+      await ensureDatabaseLoaded({ minIntervalMs: 2000, includeLogs: true, includePhraseArchive: false });
       const db = getDb();
       const tg = isServerlessRuntime()
         ? await refreshServerlessTelegramStatus()
@@ -263,7 +265,7 @@ export function createExpressApp(): express.Express {
         lastLeaderboardDate: c.lastLeaderboardDate,
         lastEveningReportDate: c.lastEveningReportDate,
         lastAutoChatReplyAt: c.lastAutoChatReplyAt,
-        usedQuotesCount: (c.usedPhraseKeys || []).length,
+        usedQuotesCount: c.usedPhraseCount ?? (c.usedPhraseKeys || []).length,
         lotteryTicketsCount: c.lottery?.tickets?.length || 0,
         players: Object.values(c.players).map((p) => ({
           ...p,
@@ -388,20 +390,42 @@ export function createExpressApp(): express.Express {
   });
 
   app.post('/api/telegram/webhook', async (req, res) => {
+    let targetChatId: string | undefined;
     try {
-      await ensureDatabaseLoaded({ forceRemote: true });
       const update = req.body;
       if (!update || typeof update !== 'object') {
         res.status(200).json({ ok: false, error: 'Empty update payload' });
         return;
       }
+
+      const updateId = typeof update.update_id === 'number' ? update.update_id : null;
+      if (updateId !== null) {
+        const claimed = await claimTelegramUpdateId(updateId);
+        if (!claimed) {
+          res.status(200).json({ ok: true, duplicate: true });
+          return;
+        }
+      }
+
+      const rawChatId =
+        update?.message?.chat?.id ??
+        update?.callback_query?.message?.chat?.id ??
+        update?.edited_message?.chat?.id;
+      targetChatId = rawChatId !== undefined && rawChatId !== null ? String(rawChatId) : undefined;
+
+      await ensureDatabaseLoaded({
+        forceRemote: true,
+        targetChatId,
+        includeLogs: false,
+        includePhraseArchive: true
+      });
       const result = await handleTelegramWebhook(update);
       await sweepExpiredLobbies();
-      await flushDatabaseToFirebase();
+      await flushDatabaseToFirebase(false, targetChatId);
       res.status(200).json(result);
     } catch (err: any) {
       console.error('[Webhook] Error processing Telegram update:', err?.message || err);
-      await flushDatabaseToFirebase().catch(() => {});
+      await flushDatabaseToFirebase(false, targetChatId).catch(() => {});
       res.status(200).json({ ok: false, error: err?.message || 'Webhook handler error' });
     }
   });
@@ -418,9 +442,10 @@ export function createExpressApp(): express.Express {
     }
 
     try {
-      await ensureDatabaseLoaded({ forceRemote: true });
+      await ensureDatabaseLoaded({ forceRemote: true, includePhraseArchive: true, includeLogs: false });
       const result = await runScheduledTasksNow(runSimulatorScheduledBroadcast);
       await flushDatabaseToFirebase();
+      await pruneFirebaseArchives();
       res.json({ ok: true, ...result });
     } catch (err: any) {
       console.error('[Cron] Execution failed:', err?.message || err);
@@ -433,15 +458,20 @@ export function createExpressApp(): express.Express {
 
   app.get('/api/sim/messages', async (req, res) => {
     try {
-      await ensureDatabaseLoaded({ minIntervalMs: 1500 });
       const chatId = String(req.query.chatId || 'sim-chat-1');
+      await ensureDatabaseLoaded({
+        minIntervalMs: 1500,
+        targetChatId: chatId,
+        includeLogs: false,
+        includePhraseArchive: true
+      });
       if (chatId === 'sim-chat-1' && getSimMessages(chatId).length === 0) {
         const seeded = await seedSimulatorWelcomeIfEmpty();
-        if (seeded) await flushDatabaseToFirebase();
+        if (seeded) await flushDatabaseToFirebase(false, chatId);
       }
       await sweepExpiredLobbies();
       if (isRuntimeDirty()) {
-        await flushDatabaseToFirebase();
+        await flushDatabaseToFirebase(false, chatId);
       }
       const chat = getDb().chats[chatId];
       res.json({
@@ -457,8 +487,8 @@ export function createExpressApp(): express.Express {
 
   app.post('/api/sim/command', async (req, res) => {
     try {
-      await ensureDatabaseLoaded({ forceRemote: true });
       const { chatId = 'sim-chat-1', userId = 'sim-user-1', command = '/start' } = req.body || {};
+      await ensureDatabaseLoaded({ forceRemote: true, targetChatId: chatId, includeLogs: false });
       const chat = getOrCreateChat(chatId, 'Чат «Дядя Деп и пацаны» (Симулятор)', 'simulator');
       const p = chat.players[userId] || { userId, firstName: 'Игрок', username: 'player' };
 
@@ -476,7 +506,7 @@ export function createExpressApp(): express.Express {
       );
 
       await sweepExpiredLobbies();
-      await flushDatabaseToFirebase();
+      await flushDatabaseToFirebase(false, chatId);
 
       res.json({
         messages: getSimMessages(chatId),
@@ -490,8 +520,8 @@ export function createExpressApp(): express.Express {
 
   app.post('/api/sim/callback', async (req, res) => {
     try {
-      await ensureDatabaseLoaded({ forceRemote: true });
       const { chatId = 'sim-chat-1', userId = 'sim-user-1', messageId, callbackData } = req.body || {};
+      await ensureDatabaseLoaded({ forceRemote: true, targetChatId: chatId, includeLogs: false });
       const chat = getOrCreateChat(chatId, 'Чат «Дядя Деп и пацаны» (Симулятор)', 'simulator');
       const p = chat.players[userId] || { userId, firstName: 'Игрок', username: 'player' };
 
@@ -507,7 +537,7 @@ export function createExpressApp(): express.Express {
       );
 
       await sweepExpiredLobbies();
-      await flushDatabaseToFirebase();
+      await flushDatabaseToFirebase(false, chatId);
 
       res.json({
         messages: getSimMessages(chatId),
@@ -521,7 +551,6 @@ export function createExpressApp(): express.Express {
 
   app.post('/api/sim/message', async (req, res) => {
     try {
-      await ensureDatabaseLoaded({ forceRemote: true });
       const {
         chatId = 'sim-chat-1',
         userId = 'sim-user-1',
@@ -529,6 +558,7 @@ export function createExpressApp(): express.Express {
         bypassCooldown = true,
         forceTrigger = false
       } = req.body || {};
+      await ensureDatabaseLoaded({ forceRemote: true, targetChatId: chatId, includeLogs: false });
       const chat = getOrCreateChat(chatId, 'Чат «Дядя Деп и пацаны» (Симулятор)', 'simulator');
       const p = chat.players[userId] || { userId, firstName: 'Игрок', username: 'player' };
 
@@ -558,7 +588,7 @@ export function createExpressApp(): express.Express {
       }
 
       await sweepExpiredLobbies();
-      await flushDatabaseToFirebase();
+      await flushDatabaseToFirebase(false, chatId);
 
       res.json({
         triggered,
@@ -573,14 +603,14 @@ export function createExpressApp(): express.Express {
 
   app.post('/api/sim/set-zero', async (req, res) => {
     try {
-      await ensureDatabaseLoaded({ forceRemote: true });
       const { chatId = 'sim-chat-1', userId = 'sim-user-1' } = req.body || {};
+      await ensureDatabaseLoaded({ forceRemote: true, targetChatId: chatId, includeLogs: false });
       const chat = getDb().chats[chatId];
       if (chat && chat.players[userId]) {
         chat.players[userId].balance = 0;
         scheduleSave();
       }
-      await flushDatabaseToFirebase();
+      await flushDatabaseToFirebase(false, chatId);
       res.json({ ok: true, players: chat ? Object.values(chat.players) : [] });
     } catch (err: any) {
       res.status(500).json({ error: err?.message || 'Set zero failed' });
@@ -589,8 +619,8 @@ export function createExpressApp(): express.Express {
 
   app.post('/api/sim/clear', async (req, res) => {
     try {
-      await ensureDatabaseLoaded({ forceRemote: true });
       const { chatId = 'sim-chat-1', userId = 'sim-user-1' } = req.body || {};
+      await ensureDatabaseLoaded({ forceRemote: true, targetChatId: chatId, includeLogs: false });
       simMessagesByChat.set(chatId, []);
       lastSimToast = null;
       markRuntimeDirty();
@@ -602,7 +632,7 @@ export function createExpressApp(): express.Express {
         { userId: p.userId, firstName: p.firstName, username: p.username },
         '/start'
       );
-      await flushDatabaseToFirebase();
+      await flushDatabaseToFirebase(false, chatId);
       res.json({ messages: getSimMessages(chatId) });
     } catch (err: any) {
       res.status(500).json({ error: err?.message || 'Clear failed' });
@@ -611,7 +641,7 @@ export function createExpressApp(): express.Express {
 
   app.post('/api/broadcast/test', async (req, res) => {
     try {
-      await ensureDatabaseLoaded({ forceRemote: true });
+      await ensureDatabaseLoaded({ forceRemote: true, includePhraseArchive: true, includeLogs: false });
       const { type = 'both', includeTelegram = false } = req.body || {};
       const simId = 'sim-chat-1';
       if (type === 'horoscope' || type === 'both' || type === 'all') {

@@ -290,7 +290,7 @@ function attachBotHandlers(bot: Bot, transport: BotTransport): void {
 async function getOrCreateWebhookBot(tokenOverride?: string): Promise<Bot | null> {
   const token = resolveTelegramToken(tokenOverride);
   if (!token) return null;
-  if (webhookBot && webhookBotToken === token) {
+  if (webhookBot && webhookBotToken === token && webhookBot.isInited() && status.username) {
     return webhookBot;
   }
   const bot = new Bot(token);
@@ -343,7 +343,13 @@ export async function refreshServerlessTelegramStatus(): Promise<TelegramBotStat
   }
 
   const now = Date.now();
-  if (webhookBot && webhookBotToken === token && now - lastStatusCheckAt < 30_000) {
+  if (
+    webhookBot &&
+    webhookBotToken === token &&
+    webhookBot.isInited() &&
+    status.username &&
+    now - lastStatusCheckAt < 30_000
+  ) {
     return getTelegramStatus();
   }
 
@@ -383,10 +389,7 @@ export function getActiveTelegramTransport(): BotTransport | null {
   if (isServerlessRuntime()) {
     const token = resolveTelegramToken();
     if (token) {
-      const bot = new Bot(token);
-      webhookBot = bot;
-      webhookBotToken = token;
-      return createTelegramTransport(bot);
+      return createTelegramTransport(new Bot(token));
     }
   }
   return null;
