@@ -312,7 +312,13 @@ export function createExpressApp(): express.Express {
           tg = await startTelegramBot(cleanToken);
         }
         await flushDatabaseToFirebase();
-        res.json({ ok: true, telegram: tg, timezone: getDb().timezone, firebase: getFirebaseStatus() });
+        res.json({
+          ok: isServerlessRuntime() ? tg.running : true,
+          error: isServerlessRuntime() && !tg.running ? tg.lastError || 'Не удалось применить токен' : undefined,
+          telegram: tg,
+          timezone: getDb().timezone,
+          firebase: getFirebaseStatus()
+        });
         return;
       }
       await flushDatabaseToFirebase();
@@ -339,7 +345,7 @@ export function createExpressApp(): express.Express {
         tg = await startTelegramBot();
       }
       await flushDatabaseToFirebase();
-      res.json({ ok: true, telegram: tg });
+      res.json({ ok: tg.running, error: tg.running ? undefined : tg.lastError || undefined, telegram: tg });
     } catch (err: any) {
       res.status(500).json({ ok: false, error: err?.message || 'Restart failed' });
     }
@@ -377,14 +383,19 @@ export function createExpressApp(): express.Express {
         });
         return;
       }
-      if (token && typeof token === 'string' && token.trim().length > 10) {
-        const cleanToken = token.trim();
+      const cleanToken = typeof token === 'string' && token.trim().length > 10 ? token.trim() : undefined;
+      if (cleanToken) {
         process.env.TELEGRAM_BOT_TOKEN = cleanToken;
         setTelegramToken(cleanToken);
       }
-      const tg = await setupTelegramWebhook(targetUrl, token);
+      const tg = await setupTelegramWebhook(targetUrl, cleanToken);
       await flushDatabaseToFirebase();
-      res.json({ ok: tg.running, telegram: tg, webhookUrl: targetUrl });
+      res.json({
+        ok: tg.running,
+        error: tg.running ? undefined : tg.lastError || 'Не удалось установить Webhook',
+        telegram: tg,
+        webhookUrl: targetUrl
+      });
     } catch (err: any) {
       res.status(500).json({ ok: false, error: err?.message || 'Webhook setup failed' });
     }

@@ -628,18 +628,21 @@ export async function flushDatabaseToFirebase(force = false, targetChatId?: stri
     clearRuntimeDirty();
     return;
   }
+  if (!firebaseInitialized && !force) {
+    return;
+  }
 
   pruneTrackedMessagesInMemory();
   const metaHash = computeMetaHash();
   const patch: Record<string, unknown> = {};
 
   if (force || metaHash !== lastSavedMetaHash) {
-    patch.meta = {
-      timezone: db.timezone,
-      telegramToken: db.telegramToken || null,
-      localPollingPaused: Boolean(db.localPollingPaused),
-      trackedBotMessages: db.trackedBotMessages || []
-    };
+    patch['meta/timezone'] = db.timezone;
+    patch['meta/localPollingPaused'] = Boolean(db.localPollingPaused);
+    patch['meta/trackedBotMessages'] = db.trackedBotMessages || [];
+    if (db.telegramToken && db.telegramToken.trim().length > 0) {
+      patch['meta/telegramToken'] = db.telegramToken.trim();
+    }
   }
 
   // Per-chat delta sync: only write chats whose hot state or phrase archive actually changed

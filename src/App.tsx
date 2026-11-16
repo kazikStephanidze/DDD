@@ -160,12 +160,14 @@ export default function App() {
   };
 
   const handleUpdateConfig = async (token: string, timezone: string) => {
-    await fetch('/api/bot/config', {
+    const res = await fetch('/api/bot/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token, timezone })
     });
+    const data = await res.json().catch(() => ({ ok: false }));
     await fetchStatus();
+    return data as { ok: boolean; error?: string };
   };
 
   const handleRestartBot = async () => {
@@ -178,11 +180,14 @@ export default function App() {
     await fetchStatus();
   };
 
-  const handleSetupWebhook = async (webhookUrl?: string) => {
+  const handleSetupWebhook = async (webhookUrl?: string, token?: string) => {
+    const payload: Record<string, string> = {};
+    if (webhookUrl) payload.webhookUrl = webhookUrl;
+    if (token) payload.token = token;
     const res = await fetch('/api/bot/webhook/setup', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(webhookUrl ? { webhookUrl } : {})
+      body: JSON.stringify(payload)
     });
     const data = await res.json();
     await fetchStatus();

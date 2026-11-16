@@ -17,10 +17,10 @@ interface SimulatorViewProps {
   onCallback: (messageId: string, callbackData: string) => Promise<void>;
   onSetZero: () => Promise<void>;
   onClearChat: () => Promise<void>;
-  onUpdateConfig: (token: string, timezone: string) => Promise<void>;
+  onUpdateConfig: (token: string, timezone: string) => Promise<{ ok?: boolean; error?: string } | void>;
   onRestartBot: () => Promise<void>;
   onStopBot: () => Promise<void>;
-  onSetupWebhook: (webhookUrl?: string) => Promise<{ ok: boolean; error?: string; webhookUrl?: string }>;
+  onSetupWebhook: (webhookUrl?: string, token?: string) => Promise<{ ok: boolean; error?: string; webhookUrl?: string }>;
 }
 
 const SAMPLE_TRIGGERS = [
@@ -82,9 +82,15 @@ export function SimulatorView({
   const handleConfigSave = async (e: React.FormEvent) => {
     e.preventDefault();
     setSavingConfig(true);
+    setWebhookNote(null);
     try {
-      await onUpdateConfig(tokenInput, tzInput);
-      setTokenInput('');
+      const res = await onUpdateConfig(tokenInput, tzInput);
+      if (res && res.ok === false) {
+        setWebhookNote(res.error || 'Не удалось сохранить настройки.');
+      } else {
+        setTokenInput('');
+        setWebhookNote(tokenInput.trim() ? 'Токен и настройки сохранены.' : 'Настройки сохранены.');
+      }
     } finally {
       setSavingConfig(false);
     }
@@ -374,8 +380,13 @@ export function SimulatorView({
               Часовой пояс рассылки: <span className="font-mono-num font-medium">{timezone}</span>
             </div>
             {telegram.lastError && (
-              <div className="text-red-600 bg-red-50 border border-red-200 rounded-lg p-2 mt-2">
-                {telegram.lastError}
+              <div className="text-red-600 bg-red-50 border border-red-200 rounded-lg p-2 mt-2 space-y-1">
+                <div>{telegram.lastError}</div>
+                {!telegram.hasToken && (
+                  <div className="text-red-800/90 text-[11px] leading-snug">
+                    Вставьте токен от @BotFather в поле «Новый токен бота» ниже и нажмите «Установить Webhook (для Vercel)» (или задайте <span className="font-mono-num">TELEGRAM_BOT_TOKEN</span> в Vercel Env Vars).
+                  </div>
+                )}
               </div>
             )}
             {telegram.mode === 'webhook' && !telegram.running && !telegram.lastError && (
@@ -495,8 +506,10 @@ export function SimulatorView({
                   setBusyAction(true);
                   setWebhookNote(null);
                   try {
-                    const res = await onSetupWebhook();
+                    const pendingToken = tokenInput.trim() || undefined;
+                    const res = await onSetupWebhook(undefined, pendingToken);
                     if (res.ok) {
+                      if (pendingToken) setTokenInput('');
                       setWebhookNote(`Webhook привязан: ${res.webhookUrl || 'готово'}`);
                     } else {
                       setWebhookNote(res.error || 'Не удалось установить Webhook');
