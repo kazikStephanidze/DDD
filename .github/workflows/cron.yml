@@ -1,0 +1,32 @@
+name: Scheduled Bot Broadcasts
+
+on:
+  schedule:
+    # Daytime & evening ticks (07:00..18:30 UTC = 10:00..21:30 Europe/Minsk) for Blitz, 12:00/12:01, and 21:00 Evening Report
+    - cron: '*/30 7-18 * * *'
+    # Exact 20:55 Europe/Minsk (17:55 UTC) Daily Lottery Draw + 21:00 Evening Report trigger
+    - cron: '55 17 * * *'
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: bot-scheduled-cron
+  cancel-in-progress: false
+
+jobs:
+  trigger-cron:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Call /api/cron on Vercel
+        env:
+          CRON_URL: ${{ vars.BOT_CRON_URL || 'https://ddd-six-eta.vercel.app/api/cron' }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -n "$CRON_SECRET" ]; then
+            curl --fail-with-body -sS -m 55 \
+              -H "Authorization: Bearer $CRON_SECRET" \
+              "$CRON_URL"
+          else
+            curl --fail-with-body -sS -m 55 "$CRON_URL"
+          fi

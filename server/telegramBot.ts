@@ -593,16 +593,22 @@ let schedulerTimer: NodeJS.Timeout | null = null;
 let cleanupTimer: NodeJS.Timeout | null = null;
 let lobbySweepTimer: NodeJS.Timeout | null = null;
 let cleanupInProgress = false;
+const BLITZ_COOLDOWN_TOLERANCE_MS = 10 * 60 * 1000; // 10m jitter margin for external/GitHub crons
+const LAZY_CHAT_SCHEDULE_COOLDOWN_MS = 45 * 1000;
+const lastLazyScheduleCheckByChat = new Map<string, number>();
 
-async function cleanupExpiredTelegramMessages() {
+async function cleanupExpiredTelegramMessages(onlyChatId?: string) {
   const tgTransport = getActiveTelegramTransport();
   if (cleanupInProgress || !tgTransport) return;
-  const expired = getExpiredBotMessages();
+  const expiredAll = getExpiredBotMessages();
+  const expired = onlyChatId
+    ? expiredAll.filter((entry) => entry.chatId === onlyChatId)
+    : expiredAll;
   if (expired.length === 0) return;
 
   cleanupInProgress = true;
   try {
-    const batch = expired.slice(0, 20);
+    const batch = expired.slice(0, onlyChatId ? 8 : 20);
     for (const entry of batch) {
       if (entry.chatId.startsWith('sim-')) {
         untrackBotMessage(entry.chatId, entry.messageId);
@@ -625,6 +631,175 @@ async function cleanupExpiredTelegramMessages() {
   }
 }
 
+async function runScheduledBroadcastsForSingleChat(
+  chatId: string,
+  options: {
+    tgTransport: BotTransport | null;
+    dateStr: string;
+    hour: number;
+    minute: number;
+    now: number;
+    onSimulatorBroadcast?: (type: 'horoscope' | 'leaderboard' | 'evening' | 'lottery', chatId: string) => void;
+  }
+): Promise<string[]> {
+  const db = getDb();
+  const chat = db.chats[chatId];
+  if (!chat) return [];
+
+  const ranBroadcasts: string[] = [];
+  const hasPlayers = Object.keys(chat.players).length > 0;
+  const { tgTransport, dateStr, hour, minute, now, onSimulatorBroadcast } = options;
+
+  // Catch up any un-drawn yesterday/older lottery tickets regardless of current hour
+  if (
+    chat.lottery &&
+    chat.lottery.tickets.length > 0 &&
+    chat.lottery.date &&
+    chat.lottery.date < dateStr &&
+    chat.lottery.lastDrawnDate !== chat.lottery.date
+  ) {
+    const pendingDate = chat.lottery.date;
+    try {
+      if (chat.type === 'simulator') {
+        if (onSimulatorBroadcast) onSimulatorBroadcast('lottery', chat.chatId);
+        chat.lottery.lastDrawnDate = pendingDate;
+        ranBroadcasts.push(`lottery:${chat.chatId}`);
+      } else if (tgTransport) {
+        await sendDailyLotteryDrawBroadcast(tgTransport, chat.chatId, pendingDate);
+        ranBroadcasts.push(`lottery:${chat.chatId}`);
+      }
+    } catch (err: any) {
+      console.warn(`[Scheduler] Past lottery draw error (${chat.chatId}):`, err?.message || err);
+    }
+  }
+
+  // 12:00 Daily Horoscope (allow 12:00..20:59 window so serverless crons/activity never miss)
+  if (hasPlayers && hour >= 12 && hour < 21 && chat.lastHoroscopeDate !== dateStr) {
+    try {
+      if (chat.type === 'simulator') {
+        if (onSimulatorBroadcast) onSimulatorBroadcast('horoscope', chat.chatId);
+        chat.lastHoroscopeDate = dateStr;
+        ranBroadcasts.push(`horoscope:${chat.chatId}`);
+      } else if (tgTransport) {
+        await sendDailyHoroscopeBroadcast(tgTransport, chat.chatId, dateStr);
+        ranBroadcasts.push(`horoscope:${chat.chatId}`);
+      }
+    } catch (err: any) {
+      console.warn(`[Scheduler] Horoscope error (${chat.chatId}):`, err?.message || err);
+    }
+  }
+
+  // 12:01 Daily Leaderboard (on local poller wait until 12:01 so Horoscope precedes it; on serverless run any time >= 12:00)
+  const leaderboardWindowOpen =
+    (hour === 12 && (minute >= 1 || isServerlessRuntime())) || (hour > 12 && hour < 21);
+  if (hasPlayers && leaderboardWindowOpen && chat.lastLeaderboardDate !== dateStr) {
+    try {
+      if (chat.type === 'simulator') {
+        if (onSimulatorBroadcast) onSimulatorBroadcast('leaderboard', chat.chatId);
+        chat.lastLeaderboardDate = dateStr;
+        ranBroadcasts.push(`leaderboard:${chat.chatId}`);
+      } else if (tgTransport) {
+        await sendDailyLeaderboardBroadcast(tgTransport, chat.chatId, dateStr);
+        ranBroadcasts.push(`leaderboard:${chat.chatId}`);
+      }
+    } catch (err: any) {
+      console.warn(`[Scheduler] Leaderboard error (${chat.chatId}):`, err?.message || err);
+    }
+  }
+
+  // 20:55 Daily Lottery Draw (allow 20:55..23:59 window so cron jitter after 21:30 still draws tonight's pot)
+  const lotteryWindowOpen = (hour === 20 && minute >= 55) || hour >= 21;
+  if (
+    lotteryWindowOpen &&
+    chat.lottery &&
+    chat.lottery.tickets.length > 0 &&
+    chat.lottery.lastDrawnDate !== dateStr
+  ) {
+    try {
+      if (chat.type === 'simulator') {
+        if (onSimulatorBroadcast) onSimulatorBroadcast('lottery', chat.chatId);
+        chat.lottery.lastDrawnDate = dateStr;
+        ranBroadcasts.push(`lottery:${chat.chatId}`);
+      } else if (tgTransport) {
+        await sendDailyLotteryDrawBroadcast(tgTransport, chat.chatId, dateStr);
+        ranBroadcasts.push(`lottery:${chat.chatId}`);
+      }
+    } catch (err: any) {
+      console.warn(`[Scheduler] Lottery draw error (${chat.chatId}):`, err?.message || err);
+    }
+  }
+
+  // 21:00 Evening 24h Report (allow 21:00..23:59 window)
+  if (hasPlayers && hour >= 21 && chat.lastEveningReportDate !== dateStr) {
+    try {
+      if (chat.type === 'simulator') {
+        if (onSimulatorBroadcast) onSimulatorBroadcast('evening', chat.chatId);
+        chat.lastEveningReportDate = dateStr;
+        ranBroadcasts.push(`evening:${chat.chatId}`);
+      } else if (tgTransport) {
+        await sendDailyEveningReportBroadcast(tgTransport, chat.chatId, dateStr);
+        ranBroadcasts.push(`evening:${chat.chatId}`);
+      }
+    } catch (err: any) {
+      console.warn(`[Scheduler] Evening report error (${chat.chatId}):`, err?.message || err);
+    }
+  }
+
+  // Chat Blitz every ~2 hours between 10:00 and 20:00
+  if (
+    hasPlayers &&
+    chat.type !== 'simulator' &&
+    tgTransport &&
+    hour >= BLITZ_WINDOW_START_HOUR &&
+    hour < BLITZ_WINDOW_END_HOUR
+  ) {
+    const lastBlitz = chat.lastBlitzAt || 0;
+    const minCooldown = BLITZ_INTERVAL_MS - BLITZ_COOLDOWN_TOLERANCE_MS;
+    if (!hasActiveBlitzForChat(chat.chatId) && now - lastBlitz >= minCooldown) {
+      try {
+        chat.lastBlitzAt = now;
+        scheduleSave();
+        const sent = await sendChatBlitzBroadcast(tgTransport, chat.chatId);
+        if (sent) {
+          ranBroadcasts.push(`blitz:${chat.chatId}`);
+        }
+      } catch (err: any) {
+        console.warn(`[Scheduler] Blitz error (${chat.chatId}):`, err?.message || err);
+      }
+    }
+  }
+
+  return ranBroadcasts;
+}
+
+/**
+ * Piggybacked per-chat scheduler invoked on Telegram webhooks on serverless Vercel,
+ * so active chats always receive Blitz / 12:00 / 20:55 / 21:00 without waiting for a local PC server.
+ */
+export async function runScheduledTasksForChat(chatId: string): Promise<string[]> {
+  if (!chatId || chatId.startsWith('sim-')) return [];
+  const now = Date.now();
+  const prevCheck = lastLazyScheduleCheckByChat.get(chatId) || 0;
+  if (now - prevCheck < LAZY_CHAT_SCHEDULE_COOLDOWN_MS) {
+    return [];
+  }
+  lastLazyScheduleCheckByChat.set(chatId, now);
+
+  await cleanupExpiredTelegramMessages(chatId);
+
+  const tgTransport = getActiveTelegramTransport();
+  if (!tgTransport) return [];
+
+  const { dateStr, hour, minute } = getZonedDateTimeParts();
+  return runScheduledBroadcastsForSingleChat(chatId, {
+    tgTransport,
+    dateStr,
+    hour,
+    minute,
+    now
+  });
+}
+
 export async function runScheduledTasksNow(
   onSimulatorBroadcast?: (type: 'horoscope' | 'leaderboard' | 'evening' | 'lottery', chatId: string) => void
 ): Promise<{
@@ -640,90 +815,20 @@ export async function runScheduledTasksNow(
   const { dateStr, hour, minute } = getZonedDateTimeParts();
   const db = getDb();
   const tgTransport = getActiveTelegramTransport();
+  const now = Date.now();
   const ranBroadcasts: string[] = [];
 
-  // 12:00 Daily Horoscope (allow 12:00..15:59 window for cron jitter tolerance)
-  if (hour >= 12 && hour < 16) {
-    for (const chat of Object.values(db.chats)) {
-      if (chat.lastHoroscopeDate === dateStr) continue;
-      if (Object.keys(chat.players).length === 0) continue;
-
-      if (chat.type === 'simulator') {
-        if (onSimulatorBroadcast) onSimulatorBroadcast('horoscope', chat.chatId);
-        chat.lastHoroscopeDate = dateStr;
-        ranBroadcasts.push(`horoscope:${chat.chatId}`);
-      } else if (tgTransport) {
-        await sendDailyHoroscopeBroadcast(tgTransport, chat.chatId, dateStr);
-        ranBroadcasts.push(`horoscope:${chat.chatId}`);
-      }
-    }
-  }
-
-  // 12:01 Daily Leaderboard (allow 12:01..15:59 window for cron jitter tolerance)
-  if ((hour === 12 && minute >= 1) || (hour > 12 && hour < 16)) {
-    for (const chat of Object.values(db.chats)) {
-      if (chat.lastLeaderboardDate === dateStr) continue;
-      if (Object.keys(chat.players).length === 0) continue;
-
-      if (chat.type === 'simulator') {
-        if (onSimulatorBroadcast) onSimulatorBroadcast('leaderboard', chat.chatId);
-        chat.lastLeaderboardDate = dateStr;
-        ranBroadcasts.push(`leaderboard:${chat.chatId}`);
-      } else if (tgTransport) {
-        await sendDailyLeaderboardBroadcast(tgTransport, chat.chatId, dateStr);
-        ranBroadcasts.push(`leaderboard:${chat.chatId}`);
-      }
-    }
-  }
-
-  // 20:55 Daily Lottery Draw (allow 20:55..21:30 window)
-  if ((hour === 20 && minute >= 55) || (hour === 21 && minute <= 30)) {
-    for (const chat of Object.values(db.chats)) {
-      if (!chat.lottery || chat.lottery.tickets.length === 0) continue;
-      if (chat.lottery.lastDrawnDate === dateStr) continue;
-
-      if (chat.type === 'simulator') {
-        if (onSimulatorBroadcast) onSimulatorBroadcast('lottery', chat.chatId);
-        chat.lottery.lastDrawnDate = dateStr;
-        ranBroadcasts.push(`lottery:${chat.chatId}`);
-      } else if (tgTransport) {
-        await sendDailyLotteryDrawBroadcast(tgTransport, chat.chatId, dateStr);
-        ranBroadcasts.push(`lottery:${chat.chatId}`);
-      }
-    }
-  }
-
-  // 21:00 Evening 24h Report (allow 21:00..23:59 window)
-  if (hour >= 21) {
-    for (const chat of Object.values(db.chats)) {
-      if (chat.lastEveningReportDate === dateStr) continue;
-      if (Object.keys(chat.players).length === 0) continue;
-
-      if (chat.type === 'simulator') {
-        if (onSimulatorBroadcast) onSimulatorBroadcast('evening', chat.chatId);
-        chat.lastEveningReportDate = dateStr;
-        ranBroadcasts.push(`evening:${chat.chatId}`);
-      } else if (tgTransport) {
-        await sendDailyEveningReportBroadcast(tgTransport, chat.chatId, dateStr);
-        ranBroadcasts.push(`evening:${chat.chatId}`);
-      }
-    }
-  }
-
-  // Chat Blitz every ~2 hours between 10:00 and 20:00
-  if (hour >= BLITZ_WINDOW_START_HOUR && hour < BLITZ_WINDOW_END_HOUR && tgTransport) {
-    const now = Date.now();
-    for (const chat of Object.values(db.chats)) {
-      if (chat.type === 'simulator') continue;
-      if (Object.keys(chat.players).length === 0) continue;
-      if (hasActiveBlitzForChat(chat.chatId)) continue;
-      const lastBlitz = chat.lastBlitzAt || 0;
-      if (now - lastBlitz < BLITZ_INTERVAL_MS) continue;
-
-      chat.lastBlitzAt = now;
-      scheduleSave();
-      await sendChatBlitzBroadcast(tgTransport, chat.chatId);
-      ranBroadcasts.push(`blitz:${chat.chatId}`);
+  for (const chatId of Object.keys(db.chats)) {
+    const chatRan = await runScheduledBroadcastsForSingleChat(chatId, {
+      tgTransport,
+      dateStr,
+      hour,
+      minute,
+      now,
+      onSimulatorBroadcast
+    });
+    if (chatRan.length > 0) {
+      ranBroadcasts.push(...chatRan);
     }
   }
 

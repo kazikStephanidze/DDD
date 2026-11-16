@@ -165,14 +165,16 @@ export function formatCaseOddsLine(caseDef: CaseDef): string {
 }
 
 export const TALISMAN_INCOME_PER_HOUR: Record<TalismanRarity, number> = {
-  common: 3,
-  rare: 8,
-  epic: 20,
-  legendary: 50,
-  unique: 120
+  common: 2,
+  rare: 7,
+  epic: 22,
+  legendary: 68,
+  unique: 125
 };
 
-export const TALISMAN_PASSIVE_TOP_SLOTS = 8;
+export const TALISMAN_PASSIVE_TOP_SLOTS = 5;
+export const TALISMAN_RESERVE_MULTIPLIER = 0.25;
+export const TALISMAN_RESERVE_MAX_PER_HOUR = 80;
+export const TALISMAN_COLLECTION_BONUS_PER_SPECIES = 1;
 export const TALISMAN_PASSIVE_CAP_HOURS = 12;
-export const TALISMAN_INCOME_MIN_CLAIM = 5;
-
+export const TALISMAN_INCOME_MIN_CLAIM = 3;

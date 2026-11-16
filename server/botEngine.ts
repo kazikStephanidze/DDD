@@ -44,7 +44,10 @@ import {
   RARITY_META,
   TALISMAN_BY_ID,
   TALISMAN_CATALOG,
+  TALISMAN_COLLECTION_BONUS_PER_SPECIES,
   TALISMAN_INCOME_PER_HOUR,
+  TALISMAN_PASSIVE_TOP_SLOTS,
+  TALISMAN_RESERVE_MAX_PER_HOUR,
   TalismanDef,
   UNIQUE_TALISMANS,
   formatCaseOddsLine,
@@ -636,18 +639,18 @@ export function buildMainMenuText(
     const incomeSnap = player ? getTalismanIncomeSnapshot(player) : null;
     const incomeLines = incomeSnap
       ? [
-          `🏦 Доход от талисманов: +${formatHourlyRate(incomeSnap.hourlyRate)} 🪙/ч`,
+          `🏦 Доход от талисманов: +${formatHourlyRate(incomeSnap.hourlyRate)} 🪙/ч (Топ-${TALISMAN_PASSIVE_TOP_SLOTS}: +${formatHourlyRate(incomeSnap.topRate)} | Резерв: +${formatHourlyRate(incomeSnap.reserveRate)} | Коллекция: +${formatHourlyRate(incomeSnap.collectionRate)})`,
           `💰 Накоплено: ${incomeSnap.pendingCoins}/${incomeSnap.capCoins} 🪙 (максимум копится 12 часов)${incomeSnap.isFull ? ' ✅' : ''}`
         ]
       : [];
     return [
       `🧳 ТАЛИСМАНЫ, КЕЙСЫ И РЫНОК${ownerBadge}`,
       balanceLine,
-      `🎒 В шкатулке: ${col.count} шт. (ценность: ${col.recycleTotal} 🪙, уников: ${col.uniqueCount})`,
+      `🎒 В шкатулке: ${col.count} шт. · видов ${incomeSnap ? incomeSnap.uniqueSpeciesCount : 0}/${TALISMAN_CATALOG.length} (ценность: ${col.recycleTotal} 🪙, уников: ${col.uniqueCount})`,
       `✨ Значок: ${eqDef ? `${eqDef.emoji} ${eqDef.name}` : 'не надет'} · 🏛️ Уников в чате: ${chatUniquesOwned}/${UNIQUE_TALISMANS.length}`,
       ...incomeLines,
       ``,
-      `Открывай кейсы, собирай пассивный доход, плавь 5→1 или торгуй на Аукционе 👇`
+      `Открывай кейсы, собирай пассивный доход, плавь 3→1 или торгуй на Аукционе 👇`
     ]
       .filter((x, i, arr) => x !== '' || arr[i - 1] !== '')
       .join('\n');
@@ -799,7 +802,7 @@ export function buildMainMenuKeyboard(
         { text: `🎒 Шкатулка (${colCount})`, callbackData: 'tl:bag:0' }
       ],
       [
-        { text: '⚗️ Крафт (5→1)', callbackData: 'tl:craft' },
+        { text: '⚗️ Крафт (3→1)', callbackData: 'tl:craft' },
         { text: `🏛️ Пантеон (${chatUniquesOwned}/${UNIQUE_TALISMANS.length})`, callbackData: 'tl:pantheon' }
       ],
       [
@@ -4862,13 +4865,16 @@ function renderTalismanHubText(chat: ChatState, player: PlayerState): string {
     `🧳 КЕЙСЫ И ТАЛИСМАНЫ ДЯДИ ДЕПА`,
     `👤 ${playerLabel(chat, player)} | Баланс: ${player.balance} 🪙`,
     ``,
-    `🎒 В шкатулке: ${col.count} талисман(ов) (ценность: ${col.recycleTotal} 🪙, уников: ${col.uniqueCount})`,
+    `🎒 В шкатулке: ${col.count} шт. · видов ${snap.uniqueSpeciesCount}/${TALISMAN_CATALOG.length} (ценность: ${col.recycleTotal} 🪙, уников: ${col.uniqueCount})`,
     `✨ Активный значок: ${eqDef ? `${eqDef.emoji} ${eqDef.name}` : 'не надет'}`,
-    `🏦 Доход от талисманов: +${formatHourlyRate(snap.hourlyRate)} 🪙/ч`,
-    `💰 Накоплено: ${snap.pendingCoins}/${snap.capCoins} 🪙 (максимум копится 12 часов)${snap.isFull ? ' ✅' : ''}`,
+    `🏦 Доход: +${formatHourlyRate(snap.hourlyRate)} 🪙/ч`,
+    `   • Витрина Топ-${TALISMAN_PASSIVE_TOP_SLOTS} (100%): +${formatHourlyRate(snap.topRate)} 🪙/ч`,
+    `   • Резерв (${snap.reserveCount} шт. × 25%, макс ${TALISMAN_RESERVE_MAX_PER_HOUR}): +${formatHourlyRate(snap.reserveRate)} 🪙/ч${snap.reserveCapped ? ' [ЛИМИТ]' : ''}`,
+    `   • Коллекция (+${TALISMAN_COLLECTION_BONUS_PER_SPECIES}/вид): +${formatHourlyRate(snap.collectionRate)} 🪙/ч`,
+    `💰 Накоплено: ${snap.pendingCoins}/${snap.capCoins} 🪙 (макс. 12 часов)${snap.isFull ? ' ✅' : ''}`,
     `🏛️ Уникальных в чате выбито: ${chatUniquesOwned}/${UNIQUE_TALISMANS.length}`,
     ``,
-    `Лучшие 8 талисманов приносят доход каждый час (⚪ +3, 🟢 +8, 🟣 +20, 🟡 +50, 🔴 +120 🪙/ч). При просроченном долге 50% сбора уходит в погашение.`
+    `Ставки витрины: ⚪ +2, 🟢 +7, 🟣 +22, 🟡 +68, 🔴 +125 🪙/ч. Остальные сверх Топ-${TALISMAN_PASSIVE_TOP_SLOTS} капают по 25% в резерв + каждый новый вид даёт +${TALISMAN_COLLECTION_BONUS_PER_SPECIES} 🪙/ч навсегда, пока в шкатулке!`
   ].join('\n');
 }
 
@@ -4879,7 +4885,7 @@ function renderTalismanHubKeyboard(chat: ChatState, player: PlayerState): Inline
   const rows: InlineKeyboard = [
     [
       { text: '🛒 Открыть кейс', callbackData: 'tl:shop' },
-      { text: '⚗️ Крафт (5→1)', callbackData: 'tl:craft' }
+      { text: '⚗️ Крафт (3→1)', callbackData: 'tl:craft' }
     ],
     [
       { text: '🍯 Общий Котёл', callbackData: 'pot:menu' },
@@ -4982,9 +4988,9 @@ function renderTalismanBagView(
   const slice = grouped.slice(page * pageSize, (page + 1) * pageSize);
 
   const lines = [
-    `🎒 МОЯ КОЛЛЕКЦИЯ ТАЛИСМАНОВ (${col.count} шт. · Ценность: ${col.recycleTotal} 🪙)`,
+    `🎒 МОЯ КОЛЛЕКЦИЯ ТАЛИСМАНОВ (${col.count} шт. · видов ${snap.uniqueSpeciesCount}/${TALISMAN_CATALOG.length} · ${col.recycleTotal} 🪙)`,
     `👤 ${playerLabel(chat, player)} | Баланс: ${player.balance} 🪙`,
-    `🏦 Доход от талисманов: +${formatHourlyRate(snap.hourlyRate)} 🪙/ч`,
+    `🏦 Доход: +${formatHourlyRate(snap.hourlyRate)} 🪙/ч (Топ-${TALISMAN_PASSIVE_TOP_SLOTS}: +${formatHourlyRate(snap.topRate)} | Резерв: +${formatHourlyRate(snap.reserveRate)} | Коллекция: +${formatHourlyRate(snap.collectionRate)})`,
     `💰 Накоплено: ${snap.pendingCoins}/${snap.capCoins} 🪙 (максимум копится 12 часов)${snap.isFull ? ' ✅' : ''}`,
     ``
   ];
@@ -5059,7 +5065,7 @@ function renderTalismanBagView(
 
   kb.push([
     { text: '🛒 Купить кейс', callbackData: 'tl:shop' },
-    { text: '⚗️ Крафт (5→1)', callbackData: 'tl:craft' },
+    { text: '⚗️ Крафт (3→1)', callbackData: 'tl:craft' },
     { text: '↩️ Назад', callbackData: 'menu:talismans' }
   ]);
 
@@ -5088,9 +5094,9 @@ function renderTalismanItemView(
     `👤 ${playerLabel(chat, player)} | Баланс: ${player.balance} 🪙`,
     ``,
     `• Редкость: ${meta.label}`,
-    `• В коллекции: ${instances.length} шт.`,
+    `• В коллекции: ${instances.length} шт. (+${TALISMAN_COLLECTION_BONUS_PER_SPECIES} 🪙/ч за уникальный вид)`,
     `• Значок: ${isEq ? '✅ надет (отображается у ника)' : 'не надет'}`,
-    `• Доход от талисмана: +${baseRate} 🪙/ч`,
+    `• Доход: +${baseRate} 🪙/ч в Топ-${TALISMAN_PASSIVE_TOP_SLOTS} (или +${formatHourlyRate(baseRate * 0.25)} 🪙/ч в резерве)`,
     def.rarity === 'unique'
       ? `• Быстрая продажа: 🔒 недоступна (уник 1/1 на чат — продаётся только через Аукцион)`
       : `• Быстрая продажа (скупщику): +${def.recycleValue} 🪙 за 1 шт.`,
@@ -5194,9 +5200,12 @@ async function openCaseForPlayer(
     talismanId: dropped.id,
     obtainedAt: Date.now()
   };
-  syncTalismanPassiveIncome(player);
+  const beforeSnap = syncTalismanPassiveIncome(player);
+  const hadSpeciesBefore = (player.talismans || []).some((t) => t.talismanId === dropped.id);
   if (!player.talismans) player.talismans = [];
   player.talismans.push(instance);
+  const afterSnap = getTalismanIncomeSnapshot(player);
+  const rateDelta = Math.round((afterSnap.hourlyRate - beforeSnap.hourlyRate) * 100) / 100;
   recordQuestProgress(player, 'case_or_craft', 1);
   if (dropped.rarity === 'unique') {
     unlockAchievement(chat, player, 'collector_unique');
@@ -5261,12 +5270,18 @@ async function openCaseForPlayer(
       ? `🔒 Уникальная реликвия (1 из 1 на чат) — переработка запрещена!`
       : `♻️ Переработка: ${dropped.recycleValue} 🪙`;
 
+  const rateDeltaStr =
+    rateDelta > 0
+      ? ` (+${formatHourlyRate(rateDelta)} 🪙/ч${!hadSpeciesBefore ? ' · 🆕 новый вид в коллекции!' : ''})`
+      : '';
+
   const resultLines = [
     `${caseDef.emoji} КЕЙС ОТКРЫТ — ${meta.badge} ${meta.label.toUpperCase()}!`,
     `👤 Игрок: ${playerLabel(chat, player)}`,
     ``,
-    `🎁 Выпал талисман: ${dropped.emoji} ${dropped.name}`,
+    `🎁 Выпал талисман: ${dropped.emoji} ${dropped.name}${!hadSpeciesBefore ? ' 🆕' : ''}`,
     `📜 «${dropped.lore}»`,
+    `🏦 Доход шкатулки: +${formatHourlyRate(afterSnap.hourlyRate)} 🪙/ч${rateDeltaStr}`,
     valueLine,
     ...(allUniquesTakenNotice
       ? [`⚠️ Все 7 Уникальных реликвий чата уже разобраны — выдана элитная Легендарка!`]
@@ -5697,19 +5712,31 @@ async function handleTalismanCallback(
 
     const list = player.talismans || [];
     const matching = list.filter((t) => TALISMAN_BY_ID[t.talismanId]?.rarity === srcRarity);
-    if (matching.length < 5) {
-      await transport.answerCallback(callbackId, `Нужно 5 шт. этого класса, а у тебя ${matching.length}!`, true);
+    if (matching.length < 3) {
+      await transport.answerCallback(callbackId, `Нужно 3 шт. этого класса, а у тебя ${matching.length}!`, true);
       return;
     }
 
-    // Sacrifice non-equipped copies first so equipped talisman stays intact if possible
-    syncTalismanPassiveIncome(player);
+    // Preserve species diversity (keep 1 copy of each species when possible) and keep equipped intact
+    const beforeSnap = syncTalismanPassiveIncome(player);
     const eqId = player.equippedTalismanId;
-    const orderedCandidates = [
-      ...matching.filter((t) => t.talismanId !== eqId),
-      ...matching.filter((t) => t.talismanId === eqId)
-    ];
-    const toConsumeIds = new Set(orderedCandidates.slice(0, 5).map((t) => t.instanceId));
+    const seenKeep = new Set<string>();
+    const nonEqKeepers: OwnedTalisman[] = [];
+    const eqKeepers: OwnedTalisman[] = [];
+    const duplicateCandidates: OwnedTalisman[] = [];
+
+    for (const t of matching) {
+      if (!seenKeep.has(t.talismanId)) {
+        seenKeep.add(t.talismanId);
+        if (t.talismanId === eqId) eqKeepers.push(t);
+        else nonEqKeepers.push(t);
+      } else {
+        duplicateCandidates.push(t);
+      }
+    }
+
+    const orderedCandidates = [...duplicateCandidates, ...nonEqKeepers, ...eqKeepers];
+    const toConsumeIds = new Set(orderedCandidates.slice(0, 3).map((t) => t.instanceId));
     player.talismans = list.filter((t) => !toConsumeIds.has(t.instanceId));
     if (eqId && !player.talismans.some((t) => t.talismanId === eqId)) {
       player.equippedTalismanId = null;
@@ -5726,6 +5753,8 @@ async function handleTalismanCallback(
     player.stats.craftsDone = (player.stats.craftsDone || 0) + 1;
     recordQuestProgress(player, 'case_or_craft', 1);
     unlockAchievement(chat, player, 'alchemist');
+    const afterSnap = getTalismanIncomeSnapshot(player);
+    const rateDelta = Math.round((afterSnap.hourlyRate - beforeSnap.hourlyRate) * 100) / 100;
     scheduleSave();
 
     const srcMeta = RARITY_META[srcRarity];
@@ -5736,20 +5765,26 @@ async function handleTalismanCallback(
       chatId: chat.chatId,
       chatTitle: chat.title,
       userName: displayName(player),
-      event: `Крафт 5→1 (${srcMeta.label} → ${tgtMeta.label})`,
+      event: `Крафт 3→1 (${srcMeta.label} → ${tgtMeta.label})`,
       detail: `Получен ${crafted.emoji} ${crafted.name}`
     });
+
+    const deltaLabel =
+      rateDelta >= 0
+        ? `+${formatHourlyRate(rateDelta)} 🪙/ч`
+        : `${formatHourlyRate(rateDelta)} 🪙/ч`;
 
     await transport.editMessage(
       chat.chatId,
       messageId,
       [
-        `⚗️ КОНТРАКТ КРАФТА (5 → 1) ВЫПОЛНЕН!`,
+        `⚗️ КОНТРАКТ КРАФТА (3 → 1) ВЫПОЛНЕН!`,
         `👤 ${playerLabel(chat, player)}`,
         ``,
-        `🔥 Переплавлено: 5 × ${srcMeta.badge} ${srcMeta.label}`,
+        `🔥 Переплавлено: 3 × ${srcMeta.badge} ${srcMeta.label}`,
         `✨ Результат: ${tgtMeta.badge} ${crafted.emoji} ${crafted.name} (${tgtMeta.label})`,
         `📜 «${crafted.lore}»`,
+        `🏦 Доход шкатулки: +${formatHourlyRate(beforeSnap.hourlyRate)} → +${formatHourlyRate(afterSnap.hourlyRate)} 🪙/ч (${deltaLabel})`,
         `♻️ Переработка: ${crafted.recycleValue} 🪙`,
         ``,
         nextPhrase(chat, 'talismanCraft')
@@ -5782,26 +5817,26 @@ function renderTalismanCraftView(chat: ChatState, player: PlayerState): { text: 
   }
 
   const lines = [
-    `⚗️ ПОДПОЛЬНЫЙ КРАФТ ТАЛИСМАНОВ (5 → 1)`,
+    `⚗️ ПОДПОЛЬНЫЙ КРАФТ ТАЛИСМАНОВ (3 → 1)`,
     `👤 ${playerLabel(chat, player)} | Всего в шкатулке: ${list.length} шт.`,
     ``,
-    `Переплавь 5 талисманов одной редкости в 1 гарантированный талисман уровнем выше:`,
-    `• ⚪ 5 Дефолтных → 🟢 1 Редкий (у тебя: ${counts.common}/5)`,
-    `• 🟢 5 Редких → 🟣 1 Эпический (у тебя: ${counts.rare}/5)`,
-    `• 🟣 5 Эпических → 🟡 1 Легендарный (у тебя: ${counts.epic}/5)`,
+    `Переплавь 3 талисмана одной редкости в 1 гарантированный талисман уровнем выше (в первую очередь тратятся дубли, чтобы сохранить бонус коллекции):`,
+    `• ⚪ 3 Дефолтных → 🟢 1 Редкий (+6 → +7 🪙/ч | у тебя: ${counts.common}/3)`,
+    `• 🟢 3 Редких → 🟣 1 Эпический (+21 → +22 🪙/ч | у тебя: ${counts.rare}/3)`,
+    `• 🟣 3 Эпических → 🟡 1 Легендарный (+66 → +68 🪙/ч | у тебя: ${counts.epic}/3)`,
     ``,
     `ℹ️ 🔴 Уникальные реликвии (1/1 на чат) через крафт не создаются — их можно только выбить из кейса или отжать в Котле!`
   ];
 
   const kb: InlineKeyboard = [];
-  if (counts.common >= 5) {
-    kb.push([{ text: `⚗️ 5 ⚪ → 1 🟢 Редкий (${counts.common} шт.)`, callbackData: 'tl:craftdo:common' }]);
+  if (counts.common >= 3) {
+    kb.push([{ text: `⚗️ 3 ⚪ → 1 🟢 Редкий (${counts.common} шт.)`, callbackData: 'tl:craftdo:common' }]);
   }
-  if (counts.rare >= 5) {
-    kb.push([{ text: `⚗️ 5 🟢 → 1 🟣 Эпический (${counts.rare} шт.)`, callbackData: 'tl:craftdo:rare' }]);
+  if (counts.rare >= 3) {
+    kb.push([{ text: `⚗️ 3 🟢 → 1 🟣 Эпический (${counts.rare} шт.)`, callbackData: 'tl:craftdo:rare' }]);
   }
-  if (counts.epic >= 5) {
-    kb.push([{ text: `⚗️ 5 🟣 → 1 🟡 Легендарный (${counts.epic} шт.)`, callbackData: 'tl:craftdo:epic' }]);
+  if (counts.epic >= 3) {
+    kb.push([{ text: `⚗️ 3 🟣 → 1 🟡 Легендарный (${counts.epic} шт.)`, callbackData: 'tl:craftdo:epic' }]);
   }
   kb.push([
     { text: '🛒 Купить кейс', callbackData: 'tl:shop' },

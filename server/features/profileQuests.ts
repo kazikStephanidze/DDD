@@ -53,7 +53,7 @@ export const ACHIEVEMENTS_CATALOG: AchievementDef[] = [
   { id: 'jackpot_777', emoji: '🎰', title: 'Король 777', desc: 'Выбить тройку в Слоте 777' },
   { id: 'astronaut', emoji: '🚀', title: 'Космонавт', desc: 'Забрать в Краше x5.00 или выше' },
   { id: 'dodep_king', emoji: '🔥', title: 'Мастер камбэка', desc: 'Выиграть Ласт додепом (x2)' },
-  { id: 'alchemist', emoji: '⚗️', title: 'Алхимик общака', desc: 'Скрафтить талисман (контракт 5→1)' },
+  { id: 'alchemist', emoji: '⚗️', title: 'Алхимик общака', desc: 'Скрафтить талисман (контракт 3→1)' },
   { id: 'collector_unique', emoji: '🔴', title: 'Хранитель реликвии', desc: 'Получить Уникальный талисман (1/1)' },
   { id: 'philanthropist', emoji: '🤝', title: 'Кредитор чата', desc: 'Выдать P2P-займ участнику чата' },
   { id: 'oligarch_5k', emoji: '👑', title: 'Авторитет стола', desc: 'Накопить 5 000+ фантиков на балансе' }
@@ -282,10 +282,13 @@ export async function handleDailyQuestsCallback(
       talismanId: dropped.id,
       obtainedAt: Date.now()
     };
-    syncTalismanPassiveIncome(player);
+    const beforeSnap = syncTalismanPassiveIncome(player);
+    const hadSpeciesBefore = (player.talismans || []).some((t) => t.talismanId === dropped.id);
     if (!player.talismans) player.talismans = [];
     player.talismans.push(inst);
     player.stats.casesOpened = (player.stats.casesOpened || 0) + 1;
+    const afterSnap = getTalismanIncomeSnapshot(player);
+    const rateDelta = Math.round((afterSnap.hourlyRate - beforeSnap.hourlyRate) * 100) / 100;
     scheduleSave();
 
     const meta = RARITY_META[dropped.rarity];
@@ -299,6 +302,11 @@ export async function handleDailyQuestsCallback(
       detail: `Выпал ${meta.badge} ${dropped.emoji} ${dropped.name}`
     });
 
+    const deltaStr =
+      rateDelta > 0
+        ? ` (+${formatHourlyRate(rateDelta)} 🪙/ч${!hadSpeciesBefore ? ' · 🆕 новый вид!' : ''})`
+        : '';
+
     await transport.editMessage(
       chat.chatId,
       messageId,
@@ -306,8 +314,9 @@ export async function handleDailyQuestsCallback(
         `📦 БЕСПЛАТНЫЙ «БОМЖ-ПАКЕТ» ЗА ДЕЙЛИКИ!`,
         `👤 ${playerLabel(chat, player)}`,
         ``,
-        `🎁 Выпал талисман: ${meta.badge} ${dropped.emoji} ${dropped.name} (${meta.label})`,
+        `🎁 Выпал талисман: ${meta.badge} ${dropped.emoji} ${dropped.name}${!hadSpeciesBefore ? ' 🆕' : ''} (${meta.label})`,
         `📜 «${dropped.lore}»`,
+        `🏦 Доход шкатулки: +${formatHourlyRate(afterSnap.hourlyRate)} 🪙/ч${deltaStr}`,
         `♻️ Переработка: ${dropped.recycleValue} 🪙`,
         ``,
         phrase

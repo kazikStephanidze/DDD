@@ -44,6 +44,7 @@ import {
   getTelegramStatus,
   handleTelegramWebhook,
   refreshServerlessTelegramStatus,
+  runScheduledTasksForChat,
   runScheduledTasksNow,
   setupTelegramWebhook,
   startTelegramBot,
@@ -420,6 +421,11 @@ export function createExpressApp(): express.Express {
         includePhraseArchive: true
       });
       const result = await handleTelegramWebhook(update);
+      if (targetChatId && !targetChatId.startsWith('sim-')) {
+        await runScheduledTasksForChat(targetChatId).catch((err) => {
+          console.warn('[Webhook] Lazy scheduler error:', err?.message || err);
+        });
+      }
       await sweepExpiredLobbies();
       await flushDatabaseToFirebase(false, targetChatId);
       res.status(200).json(result);

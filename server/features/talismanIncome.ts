@@ -8,17 +8,30 @@ import {
 import { ChatState, PlayerState, addBotLog, scheduleSave } from '../storage.js';
 import {
   TALISMAN_BY_ID,
+  TALISMAN_COLLECTION_BONUS_PER_SPECIES,
   TALISMAN_INCOME_MIN_CLAIM,
   TALISMAN_INCOME_PER_HOUR,
   TALISMAN_PASSIVE_CAP_HOURS,
-  TALISMAN_PASSIVE_TOP_SLOTS
+  TALISMAN_PASSIVE_TOP_SLOTS,
+  TALISMAN_RESERVE_MAX_PER_HOUR,
+  TALISMAN_RESERVE_MULTIPLIER
 } from '../talismans.js';
 import { unlockAchievement } from './profileQuests.js';
 
-export interface TalismanIncomeSnapshot {
+export interface TalismanIncomeRateBreakdown {
   hourlyRate: number;
+  topRate: number;
+  reserveRate: number;
+  reserveRawRate: number;
+  reserveCapped: boolean;
+  collectionRate: number;
+  uniqueSpeciesCount: number;
   activeCount: number;
+  reserveCount: number;
   totalCount: number;
+}
+
+export interface TalismanIncomeSnapshot extends TalismanIncomeRateBreakdown {
   accruedExact: number;
   pendingCoins: number;
   capCoins: number;
@@ -36,39 +49,66 @@ export interface ClaimIncomeResult {
 }
 
 export function formatHourlyRate(rate: number): string {
-  return Number.isInteger(rate) ? String(rate) : rate.toFixed(1);
+  const rounded = Math.round(rate * 100) / 100;
+  return Number.isInteger(rounded) ? String(rounded) : String(rounded);
 }
 
-export function calcTalismanIncomeRate(player: PlayerState): {
-  hourlyRate: number;
-  activeCount: number;
-  totalCount: number;
-} {
+export function calcTalismanIncomeRate(player: PlayerState): TalismanIncomeRateBreakdown {
   const list = player.talismans || [];
   if (list.length === 0) {
-    return { hourlyRate: 0, activeCount: 0, totalCount: 0 };
+    return {
+      hourlyRate: 0,
+      topRate: 0,
+      reserveRate: 0,
+      reserveRawRate: 0,
+      reserveCapped: false,
+      collectionRate: 0,
+      uniqueSpeciesCount: 0,
+      activeCount: 0,
+      reserveCount: 0,
+      totalCount: 0
+    };
   }
 
   const rates: number[] = [];
+  const speciesSet = new Set<string>();
   for (const item of list) {
     const def = TALISMAN_BY_ID[item.talismanId];
     if (!def) continue;
     rates.push(TALISMAN_INCOME_PER_HOUR[def.rarity] || 0);
+    speciesSet.add(def.id);
   }
 
   rates.sort((a, b) => b - a);
   const topSlice = rates.slice(0, TALISMAN_PASSIVE_TOP_SLOTS);
-  const hourlyRate = topSlice.reduce((sum, r) => sum + r, 0);
+  const reserveSlice = rates.slice(TALISMAN_PASSIVE_TOP_SLOTS);
+
+  const topRate = Math.round(topSlice.reduce((sum, r) => sum + r, 0) * 100) / 100;
+  const reserveRawRate =
+    Math.round(reserveSlice.reduce((sum, r) => sum + r * TALISMAN_RESERVE_MULTIPLIER, 0) * 100) / 100;
+  const reserveRate = Math.min(TALISMAN_RESERVE_MAX_PER_HOUR, reserveRawRate);
+  const reserveCapped = reserveRawRate > TALISMAN_RESERVE_MAX_PER_HOUR;
+  const uniqueSpeciesCount = speciesSet.size;
+  const collectionRate = uniqueSpeciesCount * TALISMAN_COLLECTION_BONUS_PER_SPECIES;
+  const hourlyRate = Math.round((topRate + reserveRate + collectionRate) * 100) / 100;
 
   return {
     hourlyRate,
+    topRate,
+    reserveRate,
+    reserveRawRate,
+    reserveCapped,
+    collectionRate,
+    uniqueSpeciesCount,
     activeCount: topSlice.length,
+    reserveCount: reserveSlice.length,
     totalCount: rates.length
   };
 }
 
 export function getTalismanIncomeSnapshot(player: PlayerState, now = Date.now()): TalismanIncomeSnapshot {
-  const { hourlyRate, activeCount, totalCount } = calcTalismanIncomeRate(player);
+  const breakdown = calcTalismanIncomeRate(player);
+  const { hourlyRate } = breakdown;
   const capCoins = Math.round(hourlyRate * TALISMAN_PASSIVE_CAP_HOURS);
   const baseAccrued = Math.max(0, player.talismanIncomeAccrued || 0);
   const lastAt = player.lastTalismanIncomeAt || now;
@@ -88,9 +128,7 @@ export function getTalismanIncomeSnapshot(player: PlayerState, now = Date.now())
   const isFull = capCoins > 0 && pendingCoins >= capCoins;
 
   return {
-    hourlyRate,
-    activeCount,
-    totalCount,
+    ...breakdown,
     accruedExact,
     pendingCoins,
     capCoins,
