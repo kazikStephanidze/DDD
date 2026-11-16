@@ -29,7 +29,8 @@ export type GameType =
   | 'chicken'
   | 'blindauc'
   | 'liarsdice'
-  | 'hotpotato';
+  | 'hotpotato'
+  | 'scratch';
 
 export type TalismanRarity = 'common' | 'rare' | 'epic' | 'legendary' | 'unique';
 
@@ -193,6 +194,7 @@ export interface ChatState {
   loanRequests?: LoanRequest[];
   uniqueTalismans?: Record<string, UniqueTalismanOwner>;
   lottery?: ChatLotteryState;
+  crashHistory?: number[];
   players: Record<string, PlayerState>;
 }
 
@@ -329,6 +331,7 @@ function normalizeSingleChat(chat: ChatState): void {
   if (!chat.usedHoroscopeHashes) chat.usedHoroscopeHashes = [];
   if (!chat.lottery) chat.lottery = { date: '', tickets: [], lastDrawnDate: '' };
   if (!chat.lottery.tickets) chat.lottery.tickets = [];
+  if (!Array.isArray(chat.crashHistory)) chat.crashHistory = [];
   if (chat.lastEveningReportDate === undefined) chat.lastEveningReportDate = '';
   if (chat.lastBlitzAt === undefined) chat.lastBlitzAt = 0;
   if (!chat.players) chat.players = {};

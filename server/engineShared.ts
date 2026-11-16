@@ -52,7 +52,7 @@ export interface IncomingChat {
 
 export const GAME_TITLES: Record<GameType, string> = {
   roulette: '🎡 Текстовая рулетка',
-  crash: '🚀 Общий Краш чата (Мультиплеер)',
+  crash: '🚀 Джет Икс (Краш)',
   russian: '🔫 Русская рулетка (2–3 игрока)',
   mines: '💣 Мины / Сапёр (5×5)',
   dice: '🎲 Кости против Дяди Депа (Догон)',
@@ -71,12 +71,13 @@ export const GAME_TITLES: Record<GameType, string> = {
   chicken: '🐔 Курица / Трусишка (Дуэль 1×1)',
   blindauc: '🎁 Тёмный аукцион (Слепой лот)',
   liarsdice: '🎲 Верю — Не верю (Блеф на костях)',
-  hotpotato: '💣 Горячая картошка (Динамит на 2–6 чел.)'
+  hotpotato: '💣 Горячая картошка (Динамит на 2–6 чел.)',
+  scratch: '🎫 Скретч-карта 3×3 (Золотая стёрка)'
 };
 
 export const GAME_RULES_SHORT: Record<GameType, string> = {
   roulette: 'Красное x2 · Чёрное x2 · Зеро x14. Шарик катится с комментариями.',
-  crash: 'Общая ракета чата! Посадка 12 сек (или «Запустить сейчас!»). В полёте жми «Забрать» вовремя — на Vercel курс двигается кнопками «Лететь» / «Форсаж»!',
+  crash: 'Джет Икс на весь чат! Выбирай авто-выход (🎯 x1.5..x10) или 🕹️ Ручной режим, смотри историю иксов и жми «Взлёт!» — ракета летит с живой анимацией.',
   russian: 'Барабан на 6 слотов, 1 патрон. Проигравший становится Призраком на 3 мин, выжившие делят банк!',
   mines: 'Сетка 5×5 с 3, 5 или 7 минами. Чем больше чистых клеток — тем жирнее икс.',
   dice: 'Бросаем кубики против бота. Больше — забираешь x2. Проиграл — жми Ласт додеп (x2)!',
@@ -95,7 +96,8 @@ export const GAME_RULES_SHORT: Record<GameType, string> = {
   chicken: 'Нервная дуэль 1×1! В каждом раунде оба выбирают «Жать дальше» или «Струсить». Чем дальше дойдёте — тем выше куш (до x5), но можно сгореть!',
   blindauc: 'Дядя Деп выставляет запечатанный лот с наводкой: внутри от дырявого носка (x0.2) до слитка (x4.0) и редкого талисмана!',
   liarsdice: 'Блеф на 2–4 игроков (по 3 скрытые кости у каждого)! Смотри свои кости тайно, поднимай заявку или жми «НЕ ВЕРЮ!».',
-  hotpotato: 'Динамит на 2–6 игроков со скрытым фитилём! Перекидывай бомбу дальше или подкрути фитиль (-2 заряда, риск самоподрыва). У кого рвануло — платит выжившим!'
+  hotpotato: 'Динамит на 2–6 игроков со скрытым фитилём! Перекидывай бомбу дальше или подкрути фитиль (-2 заряда, риск самоподрыва). У кого рвануло — платит выжившим!',
+  scratch: 'Скретч-билет 3×3: открой до 4 клеток и собери множитель (👑 +2.0x, 💎 +0.8x, 🪙 +0.5x, 🍋 +0.3x). Под двумя клетками 💣 бомба — забирай куш вовремя!'
 };
 
 export function shortId(): string {
@@ -266,6 +268,14 @@ export function deductPlayerStake(player: PlayerState, stake: number): boolean {
   player.balance -= stake;
   player.stats.gamesPlayed += 1;
   return isAllIn;
+}
+
+export function refundPlayerStake(player: PlayerState, stake: number, wasAllIn?: boolean): void {
+  player.balance += stake;
+  player.stats.gamesPlayed = Math.max(0, (player.stats.gamesPlayed || 0) - 1);
+  if (wasAllIn) {
+    player.stats.allInCount = Math.max(0, (player.stats.allInCount || 0) - 1);
+  }
 }
 
 export function buildPostGameKeyboard(

@@ -9,6 +9,7 @@ import {
   maybeSendZeroBalanceOffer,
   nextPhrase,
   playerLabel,
+  refundPlayerStake,
   shortId
 } from '../engineShared.js';
 import {
@@ -38,6 +39,7 @@ interface MultiBjSeat {
   stake: number;
   initialStake: number;
   isLastDodep: boolean;
+  isAllIn?: boolean;
   hand: BjCard[];
   doubled: boolean;
   status: 'playing' | 'stood' | 'bust' | 'blackjack';
@@ -157,7 +159,7 @@ export async function sweepExpiredMultiBlackjack(now = Date.now()): Promise<void
     const chat = db.chats[table.chatId];
     for (const seat of table.seats) {
       const p = chat?.players[seat.userId];
-      if (p) p.balance += seat.stake;
+      if (p) refundPlayerStake(p, seat.stake, seat.isAllIn);
     }
     scheduleSave();
 
@@ -462,7 +464,7 @@ export async function startMultiBlackjackLobby(
   isLastDodep: boolean,
   messageId?: string
 ): Promise<void> {
-  deductPlayerStake(player, stake);
+  const isAllIn = deductPlayerStake(player, stake);
   scheduleSave();
 
   const now = Date.now();
@@ -481,6 +483,7 @@ export async function startMultiBlackjackLobby(
         stake,
         initialStake: stake,
         isLastDodep,
+        isAllIn,
         hand: [],
         doubled: false,
         status: 'playing'
@@ -552,13 +555,14 @@ export async function handleMultiBlackjackCallback(
       return;
     }
 
-    deductPlayerStake(player, table.baseStake);
+    const isAllIn = deductPlayerStake(player, table.baseStake);
     table.seats.push({
       userId: player.userId,
       firstName: displayName(player),
       stake: table.baseStake,
       initialStake: table.baseStake,
       isLastDodep: false,
+      isAllIn,
       hand: [],
       doubled: false,
       status: 'playing'
@@ -610,7 +614,7 @@ export async function handleMultiBlackjackCallback(
     bjTables.delete(table.id);
     for (const s of table.seats) {
       const p = chat.players[s.userId];
-      if (p) p.balance += s.stake;
+      if (p) refundPlayerStake(p, s.stake, s.isAllIn);
     }
     scheduleSave();
 

@@ -10,6 +10,7 @@ import {
   getGhostRemainingMs,
   maybeSendZeroBalanceOffer,
   playerLabel,
+  refundPlayerStake,
   shortId
 } from '../engineShared.js';
 import {
@@ -342,7 +343,7 @@ export async function handleBattleshipCallback(
     battleshipGames.delete(gid);
     markRuntimeDirty();
     const creator = chat.players[game.creatorId];
-    if (creator) creator.balance += game.stake;
+    if (creator) refundPlayerStake(creator, game.stake, game.sideA.isAllIn);
     scheduleSave();
     await transport.answerCallback(callbackId, 'Вызов отменён, ставка возвращена.');
     await transport.editMessage(
@@ -799,7 +800,7 @@ export async function handleChickenCallback(
     chickenDuels.delete(did);
     markRuntimeDirty();
     const creator = chat.players[duel.creatorId];
-    if (creator) creator.balance += duel.stake;
+    if (creator) refundPlayerStake(creator, duel.stake, duel.creatorAllIn);
     scheduleSave();
     await transport.answerCallback(callbackId, 'Вызов отменён.');
     await transport.editMessage(
@@ -1509,7 +1510,7 @@ export async function handleLiarsDiceCallback(
     markRuntimeDirty();
     for (const s of game.seats) {
       const ps = chat.players[s.userId];
-      if (ps) ps.balance += game.stake;
+      if (ps) refundPlayerStake(ps, game.stake, s.isAllIn);
     }
     scheduleSave();
     await transport.answerCallback(callbackId, 'Стол отменён, ставки возвращены.');
@@ -2010,7 +2011,7 @@ export async function handleHotPotatoCallback(
     markRuntimeDirty();
     for (const s of game.seats) {
       const ps = chat.players[s.userId];
-      if (ps) ps.balance += game.stake;
+      if (ps) refundPlayerStake(ps, game.stake, s.isAllIn);
     }
     scheduleSave();
     await transport.answerCallback(callbackId, 'Игра отменена, ставки возвращены.');
@@ -2205,7 +2206,7 @@ export async function sweepExpiredPartyGames(now = Date.now()): Promise<void> {
       markRuntimeDirty();
       const chat = db.chats[g.chatId];
       const creator = chat?.players[g.creatorId];
-      if (creator) creator.balance += g.stake;
+      if (creator) refundPlayerStake(creator, g.stake, g.sideA.isAllIn);
       scheduleSave();
       const tr = getPartyTransport(g.transportSource, g.chatId, g.transport);
       if (g.messageId && tr) {
@@ -2227,7 +2228,7 @@ export async function sweepExpiredPartyGames(now = Date.now()): Promise<void> {
       markRuntimeDirty();
       const chat = db.chats[d.chatId];
       const creator = chat?.players[d.creatorId];
-      if (creator) creator.balance += d.stake;
+      if (creator) refundPlayerStake(creator, d.stake, d.creatorAllIn);
       scheduleSave();
       const tr = getPartyTransport(d.transportSource, d.chatId, d.transport);
       if (d.messageId && tr) {
@@ -2262,7 +2263,7 @@ export async function sweepExpiredPartyGames(now = Date.now()): Promise<void> {
       const chat = db.chats[g.chatId];
       for (const s of g.seats) {
         const ps = chat?.players[s.userId];
-        if (ps) ps.balance += g.stake;
+        if (ps) refundPlayerStake(ps, g.stake, s.isAllIn);
       }
       scheduleSave();
       const tr = getPartyTransport(g.transportSource, g.chatId, g.transport);
@@ -2300,7 +2301,7 @@ export async function sweepExpiredPartyGames(now = Date.now()): Promise<void> {
       markRuntimeDirty();
       for (const s of h.seats) {
         const ps = chat.players[s.userId];
-        if (ps) ps.balance += h.stake;
+        if (ps) refundPlayerStake(ps, h.stake, s.isAllIn);
       }
       scheduleSave();
       const tr = getPartyTransport(h.transportSource, h.chatId, h.transport);

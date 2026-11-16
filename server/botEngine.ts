@@ -79,6 +79,7 @@ import {
   maybeSendZeroBalanceOffer,
   nextPhrase,
   playerLabel,
+  refundPlayerStake,
   sendZeroBalanceOffer,
   setMessageOwner,
   setPlayerActiveMenuMsgId,
@@ -99,11 +100,13 @@ import {
   handleCrashCallback,
   handlePenaltyCallback,
   handleRpsCallback,
+  handleScratchCallback,
   handleThimblesCallback,
   isNewGamesProtectedMsg,
   startOrJoinMultiplayerCrash,
   startPenaltyGame,
   startRpsMenu,
+  startScratchGame,
   startThimblesGame,
   sweepExpiredNewGames
 } from './games/newGames.js';
@@ -157,7 +160,7 @@ interface RussianLobby {
   chatId: string;
   stake: number;
   creatorId: string;
-  players: { userId: string; firstName: string; isLastDodep: boolean }[];
+  players: { userId: string; firstName: string; isLastDodep: boolean; isAllIn?: boolean }[];
   status: 'waiting' | 'playing' | 'finished';
   chamber: number; // 0..5 current slot
   bulletSlot: number; // 0..5 bullet slot
@@ -225,6 +228,7 @@ interface RaceBet {
   lane: number; // 0..3
   amount: number;
   isLastDodep: boolean;
+  isAllIn?: boolean;
 }
 
 interface RaceLobby {
@@ -272,6 +276,7 @@ interface DuelLobby {
   creatorSide: 'heads' | 'tails';
   stake: number;
   isLastDodep: boolean;
+  isAllIn?: boolean;
   status: 'waiting' | 'flipping' | 'finished';
   messageId: string | null;
   transportSource?: 'telegram' | 'simulator';
@@ -388,7 +393,7 @@ export async function sweepExpiredLobbies(): Promise<void> {
       const chat = db.chats[lobby.chatId];
       for (const p of lobby.players) {
         const ps = chat?.players[p.userId];
-        if (ps) ps.balance += lobby.stake;
+        if (ps) refundPlayerStake(ps, lobby.stake, p.isAllIn);
       }
       scheduleSave();
       addBotLog({
@@ -419,7 +424,7 @@ export async function sweepExpiredLobbies(): Promise<void> {
       const chat = db.chats[lobby.chatId];
       for (const b of lobby.bets) {
         const ps = chat?.players[b.userId];
-        if (ps) ps.balance += b.amount;
+        if (ps) refundPlayerStake(ps, b.amount, b.isAllIn);
       }
       scheduleSave();
       addBotLog({
@@ -449,7 +454,7 @@ export async function sweepExpiredLobbies(): Promise<void> {
       markRuntimeDirty();
       const chat = db.chats[lobby.chatId];
       const creator = chat?.players[lobby.creatorId];
-      if (creator) creator.balance += lobby.stake;
+      if (creator) refundPlayerStake(creator, lobby.stake, lobby.isAllIn);
       scheduleSave();
       addBotLog({
         source: 'scheduler',
@@ -729,7 +734,7 @@ export function buildMainMenuKeyboard(
       return [
         genreRow,
         [
-          { text: '🚀 Общий Краш', callbackData: 'g:crash' },
+          { text: '🚀 Джет Икс (Краш)', callbackData: 'g:crash' },
           { text: '🔫 Русская рулетка', callbackData: 'g:russian' }
         ],
         [
@@ -788,7 +793,10 @@ export function buildMainMenuKeyboard(
         { text: '🥃 Напёрстки', callbackData: 'g:thimbles' },
         { text: '🪨✂️📄 К-Н-Б', callbackData: 'g:rps' }
       ],
-      [{ text: '↩️ Главное меню', callbackData: 'menu:home' }]
+      [
+        { text: '🎫 Скретч-карта 3×3', callbackData: 'g:scratch' },
+        { text: '↩️ Главное меню', callbackData: 'menu:home' }
+      ]
     ];
   }
 
@@ -831,9 +839,12 @@ export function buildMainMenuKeyboard(
       ],
       [
         { text: '🏆 Доска почёта', callbackData: 'top' },
-        { text: `💸 Бонус (+${ZERO_BONUS_AMOUNT})`, callbackData: 'bonus' }
+        { text: '📅 Сводка за сутки', callbackData: 'daily_stat' }
       ],
-      [{ text: '↩️ Главное меню', callbackData: 'menu:home' }]
+      [
+        { text: `💸 Бонус (+${ZERO_BONUS_AMOUNT})`, callbackData: 'bonus' },
+        { text: '↩️ Главное меню', callbackData: 'menu:home' }
+      ]
     ];
   }
 
@@ -849,8 +860,9 @@ export function buildMainMenuKeyboard(
     ],
     [
       { text: '🏆 Доска почёта', callbackData: 'top' },
-      { text: `💸 Бонус (+${ZERO_BONUS_AMOUNT})`, callbackData: 'bonus' }
-    ]
+      { text: '📅 Сводка за сутки', callbackData: 'daily_stat' }
+    ],
+    [{ text: `💸 Бонус при нуле (+${ZERO_BONUS_AMOUNT})`, callbackData: 'bonus' }]
   ];
 }
 
@@ -939,18 +951,77 @@ export function buildLeaderboardText(chat: ChatState): string {
     positionCounts.set(userId, (positionCounts.get(userId) || 0) + 1);
   };
 
-  const richest = [...players].sort((a, b) => b.balance - a.balance)[0];
-  if (richest && richest.balance > 0) addPoint(richest.userId);
+  const formatWinners = (list: PlayerState[]): string => {
+    const shown = list.slice(0, 3).map((p) => playerLabel(chat, p));
+    return list.length > 3 ? `${shown.join(', ')} и ещё ${list.length - 3}` : shown.join(', ');
+  };
 
-  const feeder = [...players].sort((a, b) => b.stats.totalLost - a.stats.totalLost)[0];
-  if (feeder && feeder.stats.totalLost > 0) addPoint(feeder.userId);
+  const pickTopPlayers = (
+    list: PlayerState[],
+    scoreFn: (p: PlayerState) => number,
+    minThreshold = 1
+  ): { value: number; winners: PlayerState[] } => {
+    let best = -Infinity;
+    for (const p of list) {
+      const s = scoreFn(p);
+      if (Number.isFinite(s) && s > best) best = s;
+    }
+    if (!Number.isFinite(best) || best < minThreshold) {
+      return { value: 0, winners: [] };
+    }
+    const winners = list
+      .filter((p) => Math.abs(scoreFn(p) - best) < 1e-6)
+      .sort((a, b) => b.balance - a.balance || a.firstName.localeCompare(b.firstName));
+    return { value: best, winners };
+  };
 
-  const coldHead = [...players].sort((a, b) => b.stats.maxCrashMultiplier - a.stats.maxCrashMultiplier)[0];
-  if (coldHead && coldHead.stats.maxCrashMultiplier > 0) addPoint(coldHead.userId);
+  // 1. Rich list (guard when everyone is at 0)
+  const richestPick = pickTopPlayers(players, (p) => p.balance, 1);
+  richestPick.winners.forEach((w) => addPoint(w.userId));
+  const richestLine =
+    richestPick.winners.length > 0
+      ? `👑 Олигарх чата: ${formatWinners(richestPick.winners)} — ${richestPick.value} фантиков`
+      : `👑 Олигарх чата: все пока на нуле (0 🪙)`;
 
-  const dodepKing = [...players].sort((a, b) => b.stats.lastDodepWins - a.stats.lastDodepWins)[0];
-  if (dodepKing && dodepKing.stats.lastDodepWins > 0) addPoint(dodepKing.userId);
+  // 2. Feeder of the casino: prioritize true net loss (totalLost - totalWon > 0), fallback to highest totalLost
+  const netNegPlayers = players.filter((p) => (p.stats.totalLost || 0) - (p.stats.totalWon || 0) > 0);
+  let feederLine = `🤡 Главный кормилец казино: пока никто не в минусе (0)`;
+  if (netNegPlayers.length > 0) {
+    const feederPick = pickTopPlayers(
+      netNegPlayers,
+      (p) => (p.stats.totalLost || 0) - (p.stats.totalWon || 0),
+      1
+    );
+    feederPick.winners.forEach((w) => addPoint(w.userId));
+    const ref = feederPick.winners[0];
+    feederLine = `🤡 Главный кормилец казино: ${formatWinners(feederPick.winners)} — в минусе на -${feederPick.value} 🪙 (слито ${ref.stats.totalLost})`;
+  } else {
+    const grossLostPick = pickTopPlayers(players, (p) => p.stats.totalLost || 0, 1);
+    if (grossLostPick.winners.length > 0) {
+      grossLostPick.winners.forEach((w) => addPoint(w.userId));
+      const ref = grossLostPick.winners[0];
+      const net = (ref.stats.totalWon || 0) - (ref.stats.totalLost || 0);
+      feederLine = `🤡 Главный кормилец казино: ${formatWinners(grossLostPick.winners)} — сгорело ${grossLostPick.value} 🪙 (общий плюс +${net})`;
+    }
+  }
 
+  // 3. Cold head (Crash record)
+  const coldPick = pickTopPlayers(players, (p) => p.stats.maxCrashMultiplier || 0, 1.01);
+  coldPick.winners.forEach((w) => addPoint(w.userId));
+  const coldLine =
+    coldPick.winners.length > 0
+      ? `🧊 Холодная голова (Краш): ${formatWinners(coldPick.winners)} — рекорд x${coldPick.value.toFixed(2)}`
+      : `🧊 Холодная голова (Краш): никто ещё не вылетал в кэш (0)`;
+
+  // 4. Last dodep king
+  const dodepPick = pickTopPlayers(players, (p) => p.stats.lastDodepWins || 0, 1);
+  dodepPick.winners.forEach((w) => addPoint(w.userId));
+  const dodepLine =
+    dodepPick.winners.length > 0
+      ? `♻️ Король ласт-додепов: ${formatWinners(dodepPick.winners)} — камбэков x2: ${dodepPick.value}`
+      : `♻️ Король ласт-додепов: камбэков x2 пока нет (0)`;
+
+  // 5. Top debtor (tie-aware)
   const debtByBorrower = new Map<string, number>();
   for (const loan of chat.loans || []) {
     if (loan.status !== 'active') continue;
@@ -959,50 +1030,59 @@ export function buildLeaderboardText(chat: ChatState): string {
       debtByBorrower.set(loan.borrowerId, (debtByBorrower.get(loan.borrowerId) || 0) + rem);
     }
   }
-
   let topDebtorLine = `🏦 Главный должник чата: чисто — в чате никто никому не должен`;
   if (debtByBorrower.size > 0) {
-    const sortedDebtors = [...debtByBorrower.entries()].sort((a, b) => b[1] - a[1]);
-    const [topId, topDebt] = sortedDebtors[0];
-    const debtorPlayer = chat.players[topId];
-    const debtorName = debtorPlayer ? playerLabel(chat, debtorPlayer) : 'Игрок';
-    topDebtorLine = `🏦 Главный должник чата: ${debtorName} — торчит пацанам ${topDebt} фантиков`;
-    addPoint(topId);
+    const maxDebt = Math.max(...debtByBorrower.values());
+    const debtorIds = [...debtByBorrower.entries()]
+      .filter(([, amt]) => amt === maxDebt)
+      .map(([uid]) => uid);
+    debtorIds.forEach((uid) => addPoint(uid));
+    const debtorNames = debtorIds
+      .slice(0, 3)
+      .map((uid) => {
+        const dp = chat.players[uid];
+        return dp ? playerLabel(chat, dp) : 'Игрок';
+      })
+      .join(', ');
+    topDebtorLine = `🏦 Главный должник чата: ${debtorNames} — торчит пацанам ${maxDebt} фантиков`;
   }
 
-  const ghostKing = [...players].sort((a, b) => (b.stats.ghostCount || 0) - (a.stats.ghostCount || 0))[0];
-  const ghostCountVal = ghostKing?.stats.ghostCount || 0;
-  if (ghostKing && ghostCountVal > 0) addPoint(ghostKing.userId);
+  // 6. Ghost king
+  const ghostPick = pickTopPlayers(players, (p) => p.stats.ghostCount || 0, 1);
+  ghostPick.winners.forEach((w) => addPoint(w.userId));
   const ghostLine =
-    ghostCountVal > 0
-      ? `👻 Любимец барабана (Призрак чата): ${playerLabel(chat, ghostKing)} — ловил пулю ${ghostCountVal} раз(а)`
+    ghostPick.winners.length > 0
+      ? `👻 Любимец барабана (Призрак чата): ${formatWinners(ghostPick.winners)} — ловил пулю ${ghostPick.value} раз(а)`
       : `👻 Любимец барабана (Призрак чата): пока все выжили (0 выстрелов)`;
 
-  const allInKing = [...players].sort((a, b) => (b.stats.allInCount || 0) - (a.stats.allInCount || 0))[0];
-  const allInCountVal = allInKing?.stats.allInCount || 0;
-  if (allInKing && allInCountVal > 0) addPoint(allInKing.userId);
+  // 7. All-in maniac
+  const allInPick = pickTopPlayers(players, (p) => p.stats.allInCount || 0, 1);
+  allInPick.winners.forEach((w) => addPoint(w.userId));
   const allInLine =
-    allInCountVal > 0
-      ? `🧨 Маньяк ва-банка: ${playerLabel(chat, allInKing)} — заряжал на все бабки ${allInCountVal} раз(а)`
+    allInPick.winners.length > 0
+      ? `🧨 Маньяк ва-банка: ${formatWinners(allInPick.winners)} — заряжал на все бабки ${allInPick.value} раз(а)`
       : `🧨 Маньяк ва-банка: пока без безбашенных заходов (0)`;
 
-  const bonusKing = [...players].sort((a, b) => (b.stats.zeroBonusCount || 0) - (a.stats.zeroBonusCount || 0))[0];
-  const bonusCountVal = bonusKing?.stats.zeroBonusCount || 0;
-  if (bonusKing && bonusCountVal > 0) addPoint(bonusKing.userId);
+  // 8. Zero-bonus client
+  const bonusPick = pickTopPlayers(players, (p) => p.stats.zeroBonusCount || 0, 1);
+  bonusPick.winners.forEach((w) => addPoint(w.userId));
   const bonusLine =
-    bonusCountVal > 0
-      ? `🤲 Вечный клиент кассы (+${ZERO_BONUS_AMOUNT}): ${playerLabel(chat, bonusKing)} — вставал с нуля ${bonusCountVal} раз(а)`
+    bonusPick.winners.length > 0
+      ? `🤲 Вечный клиент кассы (+${ZERO_BONUS_AMOUNT}): ${formatWinners(bonusPick.winners)} — вставал с нуля ${bonusPick.value} раз(а)`
       : `🤲 Вечный клиент кассы (+${ZERO_BONUS_AMOUNT}): все пока при своих (0)`;
 
-  const collectorRanked = [...players]
-    .map((p) => ({ p, col: getPlayerCollectionSummary(p) }))
-    .sort((a, b) => b.col.score - a.col.score || b.col.count - a.col.count);
-  const topCol = collectorRanked[0];
+  // 9. Collector (only if anyone actually owns >= 1 talisman)
+  const nonEmptyCollectors = players.filter((p) => (p.talismans?.length || 0) > 0);
   let collectorLine = `🏺 Коллекционер чата: шкатулки пока пусты (0 талисманов)`;
-  if (topCol && topCol.col.count > 0) {
-    addPoint(topCol.p.userId);
-    const uniqText = topCol.col.uniqueCount > 0 ? `, уников: ${topCol.col.uniqueCount}` : '';
-    collectorLine = `🏺 Коллекционер чата: ${playerLabel(chat, topCol.p)} — ${topCol.col.count} шт. (актив: ${topCol.col.recycleTotal} 🪙${uniqText})`;
+  if (nonEmptyCollectors.length > 0) {
+    const colPick = pickTopPlayers(nonEmptyCollectors, (p) => {
+      const col = getPlayerCollectionSummary(p);
+      return col.score * 1000 + col.count;
+    }, 1);
+    colPick.winners.forEach((w) => addPoint(w.userId));
+    const sampleCol = getPlayerCollectionSummary(colPick.winners[0]);
+    const uniqText = sampleCol.uniqueCount > 0 ? `, уников: ${sampleCol.uniqueCount}` : '';
+    collectorLine = `🏺 Коллекционер чата: ${formatWinners(colPick.winners)} — ${sampleCol.count} шт. (актив: ${sampleCol.recycleTotal} 🪙${uniqText})`;
   }
 
   const rankedHolders = [...positionCounts.entries()]
@@ -1012,14 +1092,15 @@ export function buildLeaderboardText(chat: ChatState): string {
 
   let statOfStatsLines: string[];
   if (rankedHolders.length > 0) {
-    const leader = rankedHolders[0];
+    const topCount = rankedHolders[0].count;
+    const leaders = rankedHolders.filter((h) => h.count === topCount).map((h) => h.player);
     const others = rankedHolders
       .slice(0, 3)
       .map((h) => `${displayName(h.player)} (${h.count}/${TOTAL_NOMINATIONS})`)
       .join(' · ');
     statOfStatsLines = [
       `📊 СТАТИСТИКА СТАТИСТИКИ:`,
-      `🏆 Главный доминатор доски: ${playerLabel(chat, leader.player)} — занимает ${leader.count}/${TOTAL_NOMINATIONS} позиций!`,
+      `🏆 Главный доминатор доски: ${formatWinners(leaders)} — занимает ${topCount}/${TOTAL_NOMINATIONS} позиций!`,
       ...(rankedHolders.length > 1 ? [`📌 Зачёт по позициям: ${others}`] : [])
     ];
   } else {
@@ -1029,10 +1110,10 @@ export function buildLeaderboardText(chat: ChatState): string {
   return [
     `🏆 ДОСКА ПОЗОРА И ПОЧЕТА — «${chat.title}»`,
     ``,
-    `👑 Олигарх чата: ${playerLabel(chat, richest)} — ${richest.balance} фантиков`,
-    `🤡 Главный кормилец казино: ${feeder.stats.totalLost > 0 ? `${playerLabel(chat, feeder)} — слито ${feeder.stats.totalLost} фантиков` : 'пока никто не слился (0)'}`,
-    `🧊 Холодная голова (Краш): ${coldHead.stats.maxCrashMultiplier > 0 ? `${playerLabel(chat, coldHead)} — рекорд x${coldHead.stats.maxCrashMultiplier.toFixed(2)}` : 'никто ещё не летал (0)'}`,
-    `♻️ Король ласт-додепов: ${dodepKing.stats.lastDodepWins > 0 ? `${playerLabel(chat, dodepKing)} — камбэков x2: ${dodepKing.stats.lastDodepWins}` : 'камбэков x2 пока нет (0)'}`,
+    richestLine,
+    feederLine,
+    coldLine,
+    dodepLine,
     topDebtorLine,
     ghostLine,
     allInLine,
@@ -1045,40 +1126,66 @@ export function buildLeaderboardText(chat: ChatState): string {
   ].join('\n');
 }
 
-export function buildEveningSummaryText(chat: ChatState): string {
+export function buildEveningSummaryText(chat: ChatState, options?: { isPreview?: boolean }): string {
+  const isPreview = Boolean(options?.isPreview);
   const players = Object.values(chat.players);
   if (players.length === 0) {
-    return `🌙 ВЕЧЕРНЯЯ СВОДКА ДЯДИ ДЕПА (21:00)\n\nВ чате «${chat.title}» за последние сутки пока никто не заходил за стол.`;
+    return `${
+      isPreview ? '📅 СУТОЧНАЯ СТАТИСТИКА ДЯДИ ДЕПА' : '🌙 ВЕЧЕРНЯЯ СВОДКА ДЯДИ ДЕПА (21:00)'
+    }\n\nВ чате «${chat.title}» за последние сутки пока никто не заходил за стол.`;
   }
 
+  const tz = getDb().timezone || 'Europe/Minsk';
+  let earliestSince = Date.now();
   const rows = players
     .map((p) => {
       const base = p.dailyBaseline || createBaselineFromPlayer(p);
+      if (base.sinceAt && base.sinceAt < earliestSince) earliestSince = base.sinceAt;
       const games = Math.max(0, (p.stats.gamesPlayed || 0) - (base.gamesPlayed || 0));
       const won = Math.max(0, (p.stats.totalWon || 0) - (base.totalWon || 0));
       const lost = Math.max(0, (p.stats.totalLost || 0) - (base.totalLost || 0));
       const cases = Math.max(0, (p.stats.casesOpened || 0) - (base.casesOpened || 0));
       const delta = p.balance - base.balance;
+      const gameNet = won - lost;
+      const otherDelta = delta - gameNet;
       const active = games > 0 || won > 0 || lost > 0 || cases > 0 || delta !== 0;
-      return { p, games, won, lost, cases, delta, active };
+      return { p, games, won, lost, cases, delta, gameNet, otherDelta, active };
     })
     .sort((a, b) => {
       if (a.active !== b.active) return a.active ? -1 : 1;
-      return b.delta - a.delta || b.games - a.games || b.p.balance - a.p.balance;
+      return b.gameNet - a.gameNet || b.delta - a.delta || b.games - a.games || b.p.balance - a.p.balance;
     });
 
+  let sinceLabel = '';
+  try {
+    sinceLabel = new Intl.DateTimeFormat('ru-RU', {
+      timeZone: tz,
+      day: '2-digit',
+      month: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit'
+    }).format(new Date(earliestSince));
+  } catch {
+    sinceLabel = '';
+  }
+
   const activeRows = rows.filter((r) => r.active);
-  const listToRender = (activeRows.length > 0 ? rows : rows.slice(0, 10)).slice(0, 20);
+  const listToRender = (activeRows.length > 0 ? activeRows : rows.slice(0, 10)).slice(0, 20);
 
   const playerLines: string[] = [];
   listToRender.forEach((r, idx) => {
+    const netSign = r.gameNet > 0 ? '+' : '';
     const deltaSign = r.delta > 0 ? '+' : '';
     const deltaEmoji = r.delta > 0 ? '📈' : r.delta < 0 ? '📉' : '➖';
     const casesSuffix = r.cases > 0 ? ` | 🧳 Кейсов: ${r.cases}` : '';
+    const otherTag =
+      r.otherDelta !== 0
+        ? ` [кейсы/бонусы/прочее: ${r.otherDelta > 0 ? '+' : ''}${r.otherDelta}]`
+        : '';
     playerLines.push(
       `${idx + 1}. ${playerLabel(chat, r.p)}`,
-      `   🎲 Игр: ${r.games}${casesSuffix} | 🟢 Поднял: +${r.won} | 🔴 Слил: -${r.lost}`,
-      `   ${deltaEmoji} Прирост за сутки: ${deltaSign}${r.delta} 🪙 (баланс: ${r.p.balance} 🪙)`
+      `   🎲 Игр: ${r.games}${casesSuffix} | 🟢 +${r.won} / 🔴 −${r.lost} (в играх: ${netSign}${r.gameNet} 🪙)`,
+      `   ${deltaEmoji} Итого баланс: ${deltaSign}${r.delta} 🪙${otherTag} → ${r.p.balance} 🪙`
     );
   });
 
@@ -1089,26 +1196,35 @@ export function buildEveningSummaryText(chat: ChatState): string {
   const totalGames = rows.reduce((s, r) => s + r.games, 0);
   const totalWon = rows.reduce((s, r) => s + r.won, 0);
   const totalLost = rows.reduce((s, r) => s + r.lost, 0);
+  const totalGameNet = totalWon - totalLost;
   const totalCases = rows.reduce((s, r) => s + r.cases, 0);
 
-  const topGainer = [...activeRows].sort((a, b) => b.delta - a.delta)[0];
-  const topLoser = [...activeRows].sort((a, b) => a.delta - b.delta)[0];
+  const topGameGainer = [...activeRows].sort((a, b) => b.gameNet - a.gameNet)[0];
+  const topGameLoser = [...activeRows].sort((a, b) => a.gameNet - b.gameNet)[0];
+  const topBalanceGainer = [...activeRows].sort((a, b) => b.delta - a.delta)[0];
 
   const footerSummary: string[] = [
-    `📊 ИТОГ ЗА СУТКИ ПО ЧАТУ:`,
+    `📊 ИТОГ ЗА ПЕРИОД ПО ЧАТУ:`,
     `• Всего игр: ${totalGames} | Кейсов открыто: ${totalCases}`,
-    `• Суммарно подняли: +${totalWon} 🪙 | Слили: -${totalLost} 🪙`
+    `• Игры/лотерея/доход: +${totalWon} 🪙 / −${totalLost} 🪙 (чистыми: ${totalGameNet >= 0 ? '+' : ''}${totalGameNet} 🪙)`
   ];
-  if (topGainer && topGainer.delta > 0) {
-    footerSummary.push(`🚀 Главный плюс дня: ${playerLabel(chat, topGainer.p)} (+${topGainer.delta} 🪙)`);
+  if (topGameGainer && topGameGainer.gameNet > 0) {
+    footerSummary.push(`🚀 Лучший по играм дня: ${playerLabel(chat, topGameGainer.p)} (+${topGameGainer.gameNet} 🪙)`);
   }
-  if (topLoser && topLoser.delta < 0) {
-    footerSummary.push(`💸 Главный минус дня: ${playerLabel(chat, topLoser.p)} (${topLoser.delta} 🪙)`);
+  if (topGameLoser && topGameLoser.gameNet < 0) {
+    footerSummary.push(`💸 Главный минус в играх: ${playerLabel(chat, topGameLoser.p)} (${topGameLoser.gameNet} 🪙)`);
+  }
+  if (
+    topBalanceGainer &&
+    topBalanceGainer.delta > 0 &&
+    topBalanceGainer.p.userId !== topGameGainer?.p.userId
+  ) {
+    footerSummary.push(`📈 Макс. прирост баланса: ${playerLabel(chat, topBalanceGainer.p)} (+${topBalanceGainer.delta} 🪙)`);
   }
 
   return [
-    `🌙 ВЕЧЕРНЯЯ СВОДКА ДЯДИ ДЕПА (21:00)`,
-    `📅 Статистика за последние сутки · «${chat.title}»`,
+    isPreview ? `📅 СУТОЧНАЯ СТАТИСТИКА ДЯДИ ДЕПА` : `🌙 ВЕЧЕРНЯЯ СВОДКА ДЯДИ ДЕПА (21:00)`,
+    `💬 Чат «${chat.title}»${sinceLabel ? ` · отсчёт с ${sinceLabel}` : ''}`,
     ``,
     ...playerLines,
     ``,
@@ -1197,6 +1313,10 @@ export async function handleCommand(
   }
   if (cmd === '/top') {
     await transport.sendMessage(chat.chatId, buildLeaderboardText(chat), [
+      [
+        { text: '📅 Сводка за сутки', callbackData: 'daily_stat' },
+        { text: '🔄 Обновить', callbackData: 'top' }
+      ],
       [{ text: '🏠 В меню', callbackData: 'menu' }]
     ]);
     return;
@@ -1308,7 +1428,7 @@ function isActiveSoloStepAction(parts: string[]): boolean {
   const action = parts[0];
   const sub = parts[1];
   if (action === 'mn') return sub !== 'cfg';
-  if (action === 'dc' || action === 'bj' || action === 'hl' || action === 'th' || action === 'pn') {
+  if (action === 'dc' || action === 'bj' || action === 'hl' || action === 'th' || action === 'pn' || action === 'sc') {
     return true;
   }
   if (action === 'ldr') return sub !== 'cfg';
@@ -1477,14 +1597,36 @@ export async function handleCallback(
   // Leaderboard (edits in place when clicked via inline button)
   if (action === 'top') {
     await transport.answerCallback(callbackId);
+    const topKb: InlineKeyboard = [
+      [
+        { text: '📅 Сводка за сутки', callbackData: 'daily_stat' },
+        { text: '🔄 Обновить', callbackData: 'top' }
+      ],
+      [{ text: '🏠 В меню', callbackData: 'menu' }]
+    ];
     if (messageId) {
-      await transport.editMessage(chat.chatId, messageId, buildLeaderboardText(chat), [
-        [{ text: '🏠 В меню', callbackData: 'menu' }]
-      ]);
+      await transport.editMessage(chat.chatId, messageId, buildLeaderboardText(chat), topKb);
     } else {
-      await transport.sendMessage(chat.chatId, buildLeaderboardText(chat), [
-        [{ text: '🏠 В меню', callbackData: 'menu' }]
-      ]);
+      await transport.sendMessage(chat.chatId, buildLeaderboardText(chat), topKb);
+    }
+    return;
+  }
+
+  // On-demand 24h daily statistics preview
+  if (action === 'daily_stat') {
+    await transport.answerCallback(callbackId);
+    const dailyKb: InlineKeyboard = [
+      [
+        { text: '🏆 Доска почёта', callbackData: 'top' },
+        { text: '🔄 Обновить', callbackData: 'daily_stat' }
+      ],
+      [{ text: '🏠 В меню', callbackData: 'menu' }]
+    ];
+    const summaryText = buildEveningSummaryText(chat, { isPreview: true });
+    if (messageId) {
+      await transport.editMessage(chat.chatId, messageId, summaryText, dailyKb);
+    } else {
+      await transport.sendMessage(chat.chatId, summaryText, dailyKb);
     }
     return;
   }
@@ -1696,8 +1838,8 @@ export async function handleCallback(
         return;
       }
 
-      deductPlayerStake(player, lobby.stake);
-      lobby.players.push({ userId: player.userId, firstName: displayName(player), isLastDodep: false });
+      const isAllIn = deductPlayerStake(player, lobby.stake);
+      lobby.players.push({ userId: player.userId, firstName: displayName(player), isLastDodep: false, isAllIn });
       scheduleSave();
 
       await transport.answerCallback(callbackId, 'Ты вписался в Русскую рулетку!');
@@ -1738,7 +1880,7 @@ export async function handleCallback(
       // Refund everyone
       for (const p of lobby.players) {
         const ps = chat.players[p.userId];
-        if (ps) ps.balance += lobby.stake;
+        if (ps) refundPlayerStake(ps, lobby.stake, p.isAllIn);
       }
       lobby.status = 'finished';
       russianLobbies.delete(sid);
@@ -2336,6 +2478,12 @@ export async function handleCallback(
     return;
   }
 
+  // Scratch Card 3x3 ("Скретч-карта")
+  if (action === 'sc') {
+    await handleScratchCallback(transport, chat, player, callbackId, messageId, parts);
+    return;
+  }
+
   await transport.answerCallback(callbackId);
 }
 
@@ -2429,8 +2577,13 @@ async function startGameFlow(
     return;
   }
 
+  if (game === 'scratch') {
+    await startScratchGame(transport, chat, player, stake, isLastDodep, messageId);
+    return;
+  }
+
   if (game === 'russian') {
-    deductPlayerStake(player, stake);
+    const isAllIn = deductPlayerStake(player, stake);
     scheduleSave();
 
     const sid = shortId();
@@ -2439,7 +2592,7 @@ async function startGameFlow(
       chatId: chat.chatId,
       stake,
       creatorId: player.userId,
-      players: [{ userId: player.userId, firstName: displayName(player), isLastDodep }],
+      players: [{ userId: player.userId, firstName: displayName(player), isLastDodep, isAllIn }],
       status: 'waiting',
       chamber: 0,
       bulletSlot: Math.floor(Math.random() * 6),
@@ -4217,7 +4370,7 @@ async function handleRaceCallback(
       return;
     }
 
-    deductPlayerStake(player, stake);
+    const isAllIn = deductPlayerStake(player, stake);
     scheduleSave();
 
     const sid = shortId();
@@ -4226,7 +4379,7 @@ async function handleRaceCallback(
       chatId: chat.chatId,
       stake,
       creatorId: player.userId,
-      bets: [{ userId: player.userId, firstName: displayName(player), lane, amount: stake, isLastDodep }],
+      bets: [{ userId: player.userId, firstName: displayName(player), lane, amount: stake, isLastDodep, isAllIn }],
       positions: [0, 0, 0, 0],
       status: 'waiting',
       messageId: messageId || null,
@@ -4275,13 +4428,14 @@ async function handleRaceCallback(
       return;
     }
 
-    deductPlayerStake(player, lobby.stake);
+    const isAllIn = deductPlayerStake(player, lobby.stake);
     lobby.bets.push({
       userId: player.userId,
       firstName: displayName(player),
       lane,
       amount: lobby.stake,
-      isLastDodep: false
+      isLastDodep: false,
+      isAllIn
     });
     scheduleSave();
 
@@ -4302,7 +4456,7 @@ async function handleRaceCallback(
     }
     for (const b of lobby.bets) {
       const p = chat.players[b.userId];
-      if (p) p.balance += b.amount;
+      if (p) refundPlayerStake(p, b.amount, b.isAllIn);
     }
     lobby.status = 'finished';
     raceLobbies.delete(sid);
@@ -5876,7 +6030,7 @@ async function handleDuelCallback(
       return;
     }
 
-    deductPlayerStake(player, stake);
+    const isAllIn = deductPlayerStake(player, stake);
     scheduleSave();
 
     const sid = shortId();
@@ -5888,6 +6042,7 @@ async function handleDuelCallback(
       creatorSide: side,
       stake,
       isLastDodep,
+      isAllIn,
       status: 'waiting',
       messageId: messageId || null,
       transportSource: transport.source,
@@ -5937,8 +6092,7 @@ async function handleDuelCallback(
 
     lobby.status = 'finished';
     duelLobbies.delete(sid);
-    player.balance += lobby.stake;
-    player.stats.gamesPlayed = Math.max(0, player.stats.gamesPlayed - 1);
+    refundPlayerStake(player, lobby.stake, lobby.isAllIn);
     scheduleSave();
 
     await transport.answerCallback(callbackId, `Вызов отменён, ${lobby.stake} 🪙 возвращены.`);

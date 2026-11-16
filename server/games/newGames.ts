@@ -11,6 +11,7 @@ import {
   maybeSendZeroBalanceOffer,
   nextPhrase,
   playerLabel,
+  refundPlayerStake,
   shortId,
   sleep
 } from '../engineShared.js';
@@ -35,13 +36,14 @@ import {
 } from '../runtimeRegistry.js';
 
 // =====================================
-// 1. MULTIPLAYER CRASH ("ОБЩИЙ КРАШ ЧАТА")
+// 1. JETX / MULTIPLAYER CRASH ("🚀 ДЖЕТ ИКС")
 // =====================================
 
 interface CrashPassenger {
   userId: string;
   firstName: string;
   stake: number;
+  targetMult: number | null; // null = manual pilot, number = autopilot target
   isLastDodep: boolean;
   isAllIn: boolean;
   status: 'flying' | 'cashed' | 'busted';
@@ -61,6 +63,7 @@ interface CrashRound {
   messageId: string | null;
   boardingEndsAt: number;
   flightStartedAt?: number;
+  lastEvents?: string[];
   boardingTimer: NodeJS.Timeout | null;
   flyTimer: NodeJS.Timeout | null;
   transportSource?: 'telegram' | 'simulator';
@@ -69,6 +72,10 @@ interface CrashRound {
 }
 
 const crashRounds = new Map<string, CrashRound>();
+
+const CRASH_MILESTONES = [
+  1.15, 1.32, 1.55, 1.85, 2.25, 2.75, 3.4, 4.25, 5.4, 7.0, 9.2, 12.2, 16.5, 22.0, 29.0, 35.0
+];
 
 function getNewGameTransport(
   source?: 'telegram' | 'simulator',
@@ -87,122 +94,241 @@ export function findActiveCrashRoundForChat(chatId: string): CrashRound | null {
   return null;
 }
 
-function stepCrashMult(mult: number, steps = 1): number {
-  let cur = mult;
-  for (let i = 0; i < steps; i++) {
-    cur = Math.round((cur + 0.12 + cur * 0.13) * 100) / 100;
+function pushCrashHistory(chat: ChatState, mult: number): void {
+  if (!Array.isArray(chat.crashHistory)) chat.crashHistory = [];
+  chat.crashHistory.unshift(Math.round(mult * 100) / 100);
+  if (chat.crashHistory.length > 8) {
+    chat.crashHistory = chat.crashHistory.slice(0, 8);
   }
-  return cur;
+}
+
+function formatCrashHistoryBar(chat: ChatState): string {
+  const hist = chat.crashHistory || [];
+  if (hist.length === 0) return '';
+  const badges = hist.slice(0, 7).map((m) => {
+    const tag = m <= 1.05 ? '💥' : m < 1.8 ? '🔴' : m < 3.5 ? '🟡' : m < 10 ? '🟢' : '🔥';
+    return `${tag}${m.toFixed(2)}x`;
+  });
+  return `📜 История: ${badges.join(' · ')}`;
+}
+
+function getNextCrashMilestone(currentMult: number): number {
+  for (const m of CRASH_MILESTONES) {
+    if (m > currentMult + 0.001) return m;
+  }
+  return Math.round((currentMult + 5.0) * 100) / 100;
+}
+
+function getNextCrashMilestones(currentMult: number, count = 3): number[] {
+  const out: number[] = [];
+  for (const m of CRASH_MILESTONES) {
+    if (m > currentMult + 0.001) {
+      out.push(m);
+      if (out.length >= count) break;
+    }
+  }
+  if (out.length === 0) {
+    out.push(Math.round((currentMult + 4.0) * 100) / 100);
+  }
+  return out;
+}
+
+function formatPassengerTarget(targetMult: number | null): string {
+  return targetMult === null ? '🕹️ Ручной' : `🎯 Авто x${targetMult.toFixed(1).replace(/\.0$/, '')}`;
+}
+
+function settleCrashPassengerCashout(
+  chat: ChatState,
+  player: PlayerState | undefined,
+  entry: CrashPassenger,
+  winMult: number,
+  source: 'telegram' | 'simulator'
+): { payout: number; netProfit: number } {
+  const payout = Math.round(entry.stake * winMult);
+  const netProfit = payout - entry.stake;
+
+  entry.status = 'cashed';
+  entry.cashedMult = winMult;
+  entry.payout = payout;
+
+  if (player) {
+    player.balance += payout;
+    player.lastBetAmount = entry.stake;
+    player.lastGameType = 'crash';
+    player.stats.totalWon += Math.max(0, netProfit);
+    if (winMult > player.stats.maxCrashMultiplier) {
+      player.stats.maxCrashMultiplier = winMult;
+    }
+    if (entry.isLastDodep && player.lastActionWasLoss) {
+      player.stats.lastDodepWins += 1;
+    }
+    player.lastActionWasLoss = false;
+    player.lastActionWasLastDodep = false;
+
+    recordGameOutcome(chat, player, 'crash', Math.max(0, netProfit), {
+      isAllIn: entry.isAllIn,
+      isLastDodep: entry.isLastDodep
+    });
+    if (winMult >= 2.0) recordQuestProgress(player, 'crash_x2', 1);
+    if (winMult >= 5.0) unlockAchievement(chat, player, 'astronaut');
+  }
+
+  addBotLog({
+    source,
+    chatId: chat.chatId,
+    chatTitle: chat.title,
+    userName: entry.firstName,
+    event: `Джет Икс: Кэшаут x${winMult.toFixed(2)}`,
+    detail: `Ставка ${entry.stake} → Выигрыш ${payout} 🪙`
+  });
+
+  return { payout, netProfit };
+}
+
+function processAutoCashoutsAt(
+  chat: ChatState,
+  round: CrashRound,
+  reachedMult: number,
+  strictlyBeforeCrash = true
+): { lines: string[]; autoCollectQueue: { player: PlayerState; net: number }[] } {
+  const lines: string[] = [];
+  const autoCollectQueue: { player: PlayerState; net: number }[] = [];
+  const candidates = round.entries
+    .filter(
+      (e) =>
+        e.status === 'flying' &&
+        e.targetMult !== null &&
+        e.targetMult <= reachedMult + 0.0001 &&
+        (!strictlyBeforeCrash || e.targetMult < round.crashPoint)
+    )
+    .sort((a, b) => (a.targetMult || 0) - (b.targetMult || 0));
+
+  for (const e of candidates) {
+    const winMult = e.targetMult as number;
+    const p = chat.players[e.userId];
+    const { payout, netProfit } = settleCrashPassengerCashout(
+      chat,
+      p,
+      e,
+      winMult,
+      round.transportSource || 'telegram'
+    );
+    if (p && netProfit > 0) {
+      autoCollectQueue.push({ player: p, net: netProfit });
+    }
+    lines.push(`🪂 ${e.firstName} авто-вышел на x${winMult.toFixed(2)} (+${payout} 🪙)`);
+  }
+
+  if (lines.length > 0) {
+    round.lastEvents = [...(round.lastEvents || []), ...lines].slice(-4);
+    markRuntimeDirty();
+    scheduleSave();
+  }
+  return { lines, autoCollectQueue };
 }
 
 function buildCrashBoardingPayload(chat: ChatState, round: CrashRound): { text: string; keyboard: InlineKeyboard } {
   const leftSec = Math.max(0, Math.ceil((round.boardingEndsAt - Date.now()) / 1000));
   const totalBank = round.entries.reduce((s, e) => s + e.stake, 0);
-  const pulseIcons = ['⏳', '🔥', '🚀'];
-  const pulse = pulseIcons[(round.boardingTickCount || 0) % pulseIcons.length];
-  const filledBars = Math.max(1, Math.min(6, 6 - Math.floor(leftSec / 2)));
-  const bar = '▓'.repeat(filledBars) + '░'.repeat(6 - filledBars);
+  const allAutopilot = round.entries.length > 0 && round.entries.every((e) => e.targetMult !== null);
+  const pulse = isServerlessRuntime() ? '🛫' : ['⏳', '🔥', '🚀'][(round.boardingTickCount || 0) % 3];
+  const histBar = formatCrashHistoryBar(chat);
 
   const lines = [
-    `🚀 ОБЩИЙ КРАШ ЧАТА — ПОСАДКА НА БОРТ!`,
-    `${pulse} До взлёта: ~${leftSec} сек [${bar}] · Банк: ${totalBank} 🪙`,
+    `🚀 ДЖЕТ ИКС (КРАШ ЧАТА) — ПОСАДКА!`,
+    ...(histBar ? [histBar] : []),
+    `${pulse} ${
+      isServerlessRuntime()
+        ? 'Настрой авто-выход или ручной режим и жми «ВЗЛЁТ!»'
+        : `Автостарт через ~${leftSec} сек · или жми «ВЗЛЁТ СЕЙЧАС!»`
+    }`,
+    `💰 Общий банк борта: ${totalBank} 🪙 · Режим полёта: ${allAutopilot ? '⚡ Автопилот (живая анимация)' : '🕹️ Ручной (пилоты жмут «Забрать»)'}`,
     ``,
-    `👨‍🚀 Пассажиры (${round.entries.length}):`
+    `👨‍🚀 Экипаж на борту (${round.entries.length}):`
   ];
   for (const e of round.entries) {
     const p = chat.players[e.userId];
-    lines.push(`• ${p ? playerLabel(chat, p) : e.firstName} — ${e.stake} 🪙`);
+    lines.push(`• ${p ? playerLabel(chat, p) : e.firstName} — ${e.stake} 🪙 (${formatPassengerTarget(e.targetMult)})`);
   }
-  lines.push(``, `Запрыгивай в ракету до старта или жми «Запустить сейчас»!`);
+  lines.push(
+    ``,
+    `💡 Выбери свой авто-стоп (кнопки 🎯) и ракета сама выкинет тебя с парашютом, либо включи 🕹️ Ручной, чтобы тормозить на глаз!`
+  );
 
   const kb: InlineKeyboard = [
     [
       { text: '➕ 100 🪙', callbackData: `cr:join:${round.id}:100` },
       { text: '➕ 250 🪙', callbackData: `cr:join:${round.id}:250` },
-      { text: '➕ 500 🪙', callbackData: `cr:join:${round.id}:500` }
+      { text: '➕ 500 🪙', callbackData: `cr:join:${round.id}:500` },
+      { text: '🔥 Ва-банк', callbackData: `cr:join:${round.id}:all` }
     ],
     [
-      { text: '🔥 Ва-банк', callbackData: `cr:join:${round.id}:all` },
-      { text: '🚀 Запустить сейчас!', callbackData: `cr:launch:${round.id}` }
+      { text: '🎯 x1.5', callbackData: `cr:target:${round.id}:1.5` },
+      { text: '🎯 x2', callbackData: `cr:target:${round.id}:2` },
+      { text: '🎯 x3', callbackData: `cr:target:${round.id}:3` },
+      { text: '🎯 x5', callbackData: `cr:target:${round.id}:5` },
+      { text: '🎯 x10', callbackData: `cr:target:${round.id}:10` }
     ],
     [
-      ...(isServerlessRuntime() ? [{ text: '🔄 Обновить отсчёт', callbackData: `cr:tick:${round.id}` }] : []),
-      { text: '❌ Отменить посадку', callbackData: `cr:cancel:${round.id}` }
-    ]
+      { text: '🕹️ Ручной режим', callbackData: `cr:target:${round.id}:manual` },
+      { text: '🚀 ВЗЛЁТ СЕЙЧАС!', callbackData: `cr:launch:${round.id}` }
+    ],
+    [{ text: '❌ Отменить посадку', callbackData: `cr:cancel:${round.id}` }]
   ];
 
   return { text: lines.join('\n'), keyboard: kb };
 }
 
-function buildCrashFlyingPayload(round: CrashRound): { text: string; keyboard: InlineKeyboard } {
-  const heightBar = '🚀' + '━'.repeat(Math.min(12, Math.floor((round.currentMult - 1) * 4) + 1));
+function buildCrashFlyingPayload(round: CrashRound, allowManualControls = true): { text: string; keyboard: InlineKeyboard } {
+  const heightStep = Math.min(12, Math.max(1, Math.floor((round.currentMult - 1) * 3.5) + 1));
+  const trail = '━'.repeat(heightStep);
+  const sky = '┈'.repeat(Math.max(0, 12 - heightStep));
+  const flame = round.currentMult >= 5 ? '☄️🔥' : round.currentMult >= 2 ? '🚀✨' : '🚀';
+
   const lines = [
-    `🚀 ОБЩИЙ КРАШ ЧАТА — В ПОЛЁТЕ!`,
+    `🚀 ДЖЕТ ИКС — РАКЕТА НАБИРАЕТ ВЫСОТУ!`,
     ``,
-    `${heightBar}  x${round.currentMult.toFixed(2)}`,
+    `📈 [${trail}${flame}${sky}]  x${round.currentMult.toFixed(2)}`,
     ``
   ];
 
   for (const e of round.entries) {
     if (e.status === 'cashed') {
-      lines.push(`✅ ${e.firstName} — снял x${(e.cashedMult || 1).toFixed(2)} (+${e.payout || 0} 🪙)`);
+      lines.push(`✅ ${e.firstName} — спрыгнул на x${(e.cashedMult || 1).toFixed(2)} (+${e.payout || 0} 🪙)`);
     } else {
       const potential = Math.round(e.stake * round.currentMult);
-      lines.push(`🛫 ${e.firstName} — ${e.stake} 🪙 → сейчас ${potential} 🪙`);
+      const tag = e.targetMult !== null ? `🎯 x${e.targetMult.toFixed(1).replace(/\.0$/, '')}` : '🕹️';
+      lines.push(`🛫 ${e.firstName} (${tag}) — ${e.stake} 🪙 → ${potential} 🪙`);
     }
   }
 
-  const kb: InlineKeyboard = [
-    [{ text: `💰 ЗАБРАТЬ НА x${round.currentMult.toFixed(2)}`, callbackData: `cr:cash:${round.id}` }]
-  ];
-  if (isServerlessRuntime()) {
-    kb.push([
-      { text: '📈 Лететь (+1 шаг)', callbackData: `cr:tick:${round.id}` },
-      { text: '⚡ Форсаж (+3 шага)', callbackData: `cr:boost:${round.id}` }
-    ]);
+  if (round.lastEvents && round.lastEvents.length > 0) {
+    lines.push(``, ...round.lastEvents.slice(-2));
   }
+
+  const kb: InlineKeyboard = [];
+  if (allowManualControls && round.entries.some((e) => e.status === 'flying')) {
+    kb.push([{ text: `🪂 ЗАБРАТЬ НА x${round.currentMult.toFixed(2)}`, callbackData: `cr:cash:${round.id}` }]);
+    if (isServerlessRuntime()) {
+      const steps = getNextCrashMilestones(round.currentMult, 3);
+      kb.push(
+        steps.map((m, idx) => ({
+          text: `${idx === 0 ? '🔥' : idx === 1 ? '⚡' : '☄️'} → x${m.toFixed(2)}`,
+          callbackData: `cr:step:${round.id}:${m}`
+        }))
+      );
+    }
+  }
+
   return { text: lines.join('\n'), keyboard: kb };
 }
 
-function computeCrashMultAtNow(round: CrashRound, now = Date.now()): number {
-  const startedAt = round.flightStartedAt || round.createdAt;
-  const intervalMs = round.transportSource === 'simulator' ? 950 : 1450;
-  const ticks = Math.max(0, Math.min(80, Math.floor((now - startedAt) / intervalMs)));
-  let mult = 1.0;
-  for (let i = 0; i < ticks; i++) {
-    mult = stepCrashMult(mult, 1);
-    if (mult >= round.crashPoint) return mult;
-  }
-  return mult;
-}
-
-async function syncServerlessCrashRound(chat: ChatState, round: CrashRound): Promise<'boarding' | 'running' | 'finished'> {
-  if (!isServerlessRuntime()) return round.status;
-  if (round.status === 'boarding' && Date.now() >= round.boardingEndsAt) {
-    await launchCrashFlight(chat, round);
-  }
-  if (round.status === 'running') {
-    const nextMult = computeCrashMultAtNow(round);
-    if (nextMult >= round.crashPoint) {
-      await finishCrashRound(chat, round, true);
-      return 'finished';
-    }
-    if (nextMult > round.currentMult) {
-      round.currentMult = nextMult;
-      markRuntimeDirty();
-      const tr = getNewGameTransport(round.transportSource, chat.chatId, round.transport);
-      if (tr && round.messageId) {
-        const payload = buildCrashFlyingPayload(round);
-        await tr.editMessage(chat.chatId, round.messageId, payload.text, payload.keyboard, {
-          isAnimation: true
-        });
-      }
-    }
-  }
-  return round.status;
-}
-
-async function finishCrashRound(chat: ChatState, round: CrashRound, crashed: boolean): Promise<void> {
+async function finishCrashRound(
+  chat: ChatState,
+  round: CrashRound,
+  crashed: boolean,
+  pendingAutoQueue: { player: PlayerState; net: number }[] = []
+): Promise<void> {
   if (round.status === 'finished') return;
   round.status = 'finished';
   if (round.boardingTimer) {
@@ -214,11 +340,12 @@ async function finishCrashRound(chat: ChatState, round: CrashRound, crashed: boo
     round.flyTimer = null;
   }
   crashRounds.delete(round.id);
+  pushCrashHistory(chat, round.crashPoint);
   markRuntimeDirty();
 
   const bustedNames: string[] = [];
   const cashedLines: string[] = [];
-  const autoCollectQueue: { player: PlayerState; net: number }[] = [];
+  const autoCollectQueue: { player: PlayerState; net: number }[] = [...pendingAutoQueue];
   const zeroOfferQueue: PlayerState[] = [];
   let maxStakeForPost = 100;
 
@@ -232,7 +359,9 @@ async function finishCrashRound(chat: ChatState, round: CrashRound, crashed: boo
     if (e.status === 'cashed') {
       cashedLines.push(`✅ ${e.firstName}: x${(e.cashedMult || 1).toFixed(2)} → +${e.payout || 0} 🪙`);
       const net = (e.payout || 0) - e.stake;
-      if (net > 0) autoCollectQueue.push({ player: p, net });
+      if (net > 0 && !autoCollectQueue.some((q) => q.player.userId === p.userId)) {
+        autoCollectQueue.push({ player: p, net });
+      }
     } else {
       e.status = 'busted';
       p.stats.totalLost += e.stake;
@@ -250,15 +379,17 @@ async function finishCrashRound(chat: ChatState, round: CrashRound, crashed: boo
     source: tr?.source || 'telegram',
     chatId: chat.chatId,
     chatTitle: chat.title,
-    event: crashed ? `Общий Краш: Взрыв на x${round.crashPoint.toFixed(2)}` : `Общий Краш: Все спрыгнули!`,
+    event: crashed ? `Джет Икс: Взрыв на x${round.crashPoint.toFixed(2)}` : `Джет Икс: Все спрыгнули!`,
     detail: `Пассажиров: ${round.entries.length} · Забрали: ${cashedLines.length} · Сгорели: ${bustedNames.length}`
   });
 
   const phrase = crashed && bustedNames.length > 0 ? nextPhrase(chat, 'crashBust') : nextPhrase(chat, 'crashWinMid');
+  const histBar = formatCrashHistoryBar(chat);
   const lines = [
     crashed
-      ? `💥 КРАШ! РАКЕТА ВЗОРВАЛАСЬ НА x${round.crashPoint.toFixed(2)}!`
-      : `🪂 ВСЕ ПАССАЖИРЫ УСПЕЛИ СПРЫГНУТЬ (взрыв был бы на x${round.crashPoint.toFixed(2)})!`,
+      ? `💥 ДЖЕТ ИКС ВЗОРВАЛСЯ НА x${round.crashPoint.toFixed(2)}!`
+      : `🪂 ВСЕ ПАССАЖИРЫ СПАСЛИСЬ (ракета улетела в космос до x${round.crashPoint.toFixed(2)})!`,
+    ...(histBar ? [histBar] : []),
     ``,
     ...(cashedLines.length > 0 ? [`🏆 Выпрыгнули с профитом:`, ...cashedLines, ``] : []),
     ...(bustedNames.length > 0 ? [`🔥 Сгорели на борту: ${bustedNames.join(', ')}`, ``] : []),
@@ -282,6 +413,89 @@ async function finishCrashRound(chat: ChatState, round: CrashRound, crashed: boo
   }
 }
 
+async function runAutopilotFlightAnimation(
+  chat: ChatState,
+  round: CrashRound,
+  tr: BotTransport | null
+): Promise<void> {
+  const allAutoQueue: { player: PlayerState; net: number }[] = [];
+  const stepDelay = tr?.source === 'telegram' ? 560 : 340;
+
+  if (round.crashPoint <= 1.05) {
+    round.currentMult = 1.0;
+    if (tr) {
+      const startText = `🚀 ДЖЕТ ИКС — ЗАПУСК ДВИГАТЕЛЕЙ!\n\n🛫 Ракета отрывается от земли... x1.00`;
+      if (round.messageId) {
+        await tr.editMessage(chat.chatId, round.messageId, startText, [], { isAnimation: true });
+      } else {
+        round.messageId = await tr.sendMessage(chat.chatId, startText, []);
+      }
+      await sleep(stepDelay);
+    }
+    await finishCrashRound(chat, round, true, allAutoQueue);
+    return;
+  }
+
+  // Build clean ascending checkpoints (< crashPoint), ensuring every reachable passenger targetMult is visited
+  const targetThresholds = round.entries
+    .map((e) => e.targetMult)
+    .filter((m): m is number => m !== null && m < round.crashPoint);
+  const milestoneCandidates = CRASH_MILESTONES.filter((m) => m < round.crashPoint);
+
+  const maxTarget = targetThresholds.length > 0 ? Math.max(...targetThresholds) : 1.0;
+  const combined = Array.from(new Set([...milestoneCandidates, ...targetThresholds]))
+    .filter((m) => m > 1.0 && m < round.crashPoint)
+    .sort((a, b) => a - b);
+
+  // Trim points well past maxTarget (if everyone would cash out at maxTarget anyway)
+  const capped = combined.filter((m, idx) => m <= maxTarget || idx < 2);
+  let frames: number[] = capped;
+  if (capped.length > 6) {
+    // Keep all exact passenger targets + evenly spaced intermediate milestones up to 6 frames
+    const essential = new Set(targetThresholds);
+    const chosen = new Set<number>(essential);
+    for (let i = 0; i < capped.length && chosen.size < 6; i += Math.max(1, Math.floor(capped.length / 5))) {
+      chosen.add(capped[i]);
+    }
+    frames = Array.from(chosen).sort((a, b) => a - b).slice(0, 7);
+  }
+  if (frames.length === 0) {
+    frames = [Math.max(1.04, Math.round((round.crashPoint - 0.02) * 100) / 100)];
+  }
+
+  round.currentMult = 1.0;
+  if (tr) {
+    const startView = buildCrashFlyingPayload(round, false);
+    if (round.messageId) {
+      await tr.editMessage(chat.chatId, round.messageId, startView.text, [], { isAnimation: true });
+    } else {
+      round.messageId = await tr.sendMessage(chat.chatId, startView.text, []);
+    }
+  }
+
+  for (const nextMult of frames) {
+    if (round.status !== 'running') return;
+    await sleep(stepDelay);
+    round.currentMult = nextMult;
+    const { autoCollectQueue } = processAutoCashoutsAt(chat, round, nextMult, true);
+    allAutoQueue.push(...autoCollectQueue);
+
+    const anyStillFlying = round.entries.some((e) => e.status === 'flying');
+    if (tr && round.messageId) {
+      const frameView = buildCrashFlyingPayload(round, false);
+      await tr.editMessage(chat.chatId, round.messageId, frameView.text, [], { isAnimation: true });
+    }
+    if (!anyStillFlying) {
+      await sleep(stepDelay);
+      await finishCrashRound(chat, round, false, allAutoQueue);
+      return;
+    }
+  }
+
+  await sleep(stepDelay);
+  await finishCrashRound(chat, round, true, allAutoQueue);
+}
+
 async function launchCrashFlight(chat: ChatState, round: CrashRound): Promise<void> {
   if (round.status !== 'boarding') return;
   if (round.boardingTimer) {
@@ -297,29 +511,53 @@ async function launchCrashFlight(chat: ChatState, round: CrashRound): Promise<vo
 
   round.status = 'running';
   round.flightStartedAt = Date.now();
-  if (isServerlessRuntime()) {
-    if (round.crashPoint <= 1.05) {
-      await finishCrashRound(chat, round, true);
-      return;
-    }
-    round.currentMult = round.crashPoint > 1.12 ? 1.12 : 1.05;
-  }
   markRuntimeDirty();
-  const tr = getNewGameTransport(round.transportSource, chat.chatId, round.transport);
-  const payload = buildCrashFlyingPayload(round);
-  if (tr) {
-    if (round.messageId) {
-      await tr.editMessage(chat.chatId, round.messageId, payload.text, payload.keyboard);
-    } else {
-      round.messageId = await tr.sendMessage(chat.chatId, payload.text, payload.keyboard);
-    }
-  }
 
-  if (isServerlessRuntime()) {
+  const tr = getNewGameTransport(round.transportSource, chat.chatId, round.transport);
+  const allAutopilot = round.entries.every((e) => e.targetMult !== null);
+
+  if (allAutopilot) {
+    await runAutopilotFlightAnimation(chat, round, tr);
     return;
   }
 
-  const intervalMs = (tr?.source || round.transportSource) === 'telegram' ? 1450 : 950;
+  // Manual pilot present:
+  if (round.crashPoint <= 1.05) {
+    round.currentMult = 1.0;
+    await finishCrashRound(chat, round, true);
+    return;
+  }
+
+  if (isServerlessRuntime()) {
+    round.currentMult = round.crashPoint > 1.15 ? 1.15 : 1.05;
+    const { autoCollectQueue } = processAutoCashoutsAt(chat, round, round.currentMult, true);
+    if (!round.entries.some((e) => e.status === 'flying')) {
+      await finishCrashRound(chat, round, false, autoCollectQueue);
+      return;
+    }
+    const payload = buildCrashFlyingPayload(round, true);
+    if (tr) {
+      if (round.messageId) {
+        await tr.editMessage(chat.chatId, round.messageId, payload.text, payload.keyboard);
+      } else {
+        round.messageId = await tr.sendMessage(chat.chatId, payload.text, payload.keyboard);
+      }
+    }
+    return;
+  }
+
+  // Local Node realtime manual ascent loop through milestones + passenger targets
+  round.currentMult = 1.0;
+  const initView = buildCrashFlyingPayload(round, true);
+  if (tr) {
+    if (round.messageId) {
+      await tr.editMessage(chat.chatId, round.messageId, initView.text, initView.keyboard);
+    } else {
+      round.messageId = await tr.sendMessage(chat.chatId, initView.text, initView.keyboard);
+    }
+  }
+
+  const intervalMs = (tr?.source || round.transportSource) === 'telegram' ? 1300 : 850;
   round.flyTimer = setInterval(async () => {
     try {
       if (round.status !== 'running') {
@@ -330,20 +568,32 @@ async function launchCrashFlight(chat: ChatState, round: CrashRound): Promise<vo
         return;
       }
 
-      const nextMult = stepCrashMult(round.currentMult, 1);
+      const nextMult = getNextCrashMilestone(round.currentMult);
       if (nextMult >= round.crashPoint) {
-        await finishCrashRound(chat, round, true);
+        // Cash any autopilot teammates whose target was strictly below crashPoint first
+        const preCeiling = Math.max(round.currentMult, Math.round((round.crashPoint - 0.01) * 100) / 100);
+        const { autoCollectQueue } = processAutoCashoutsAt(chat, round, preCeiling, true);
+        const anyStillFlying = round.entries.some((e) => e.status === 'flying');
+        await finishCrashRound(chat, round, anyStillFlying, autoCollectQueue);
         return;
       }
 
       round.currentMult = nextMult;
+      const { autoCollectQueue } = processAutoCashoutsAt(chat, round, nextMult, true);
+      if (!round.entries.some((e) => e.status === 'flying')) {
+        await finishCrashRound(chat, round, false, autoCollectQueue);
+        return;
+      }
       markRuntimeDirty();
-      const tick = buildCrashFlyingPayload(round);
+      const tick = buildCrashFlyingPayload(round, true);
       const activeTr = getNewGameTransport(round.transportSource, chat.chatId, round.transport);
       if (round.messageId && activeTr) {
         await activeTr.editMessage(chat.chatId, round.messageId, tick.text, tick.keyboard, {
           isAnimation: true
         });
+        for (const item of autoCollectQueue) {
+          await applyAutoDebtCollection(activeTr, chat, item.player, item.net);
+        }
       }
     } catch (err: any) {
       console.error('[Crash] flyTimer error:', err?.message || err);
@@ -362,7 +612,7 @@ export async function startOrJoinMultiplayerCrash(
   const existing = findActiveCrashRoundForChat(chat.chatId);
   if (existing) {
     if (existing.status === 'running') {
-      const text = `🚀 Ракета в этом чате уже летит (сейчас x${existing.currentMult.toFixed(2)})! Дождись окончания полёта, чтобы зайти в следующий борт.`;
+      const text = `🚀 Джет Икс в этом чате уже летит (сейчас x${existing.currentMult.toFixed(2)})! Дождись посадки или взрыва этого борта.`;
       if (messageId) {
         await transport.editMessage(chat.chatId, messageId, text, [[{ text: '🏠 В меню', callbackData: 'menu' }]]);
       } else {
@@ -374,7 +624,7 @@ export async function startOrJoinMultiplayerCrash(
     if (existing.entries.some((e) => e.userId === player.userId)) {
       const view = buildCrashBoardingPayload(chat, existing);
       if (messageId && messageId !== existing.messageId) {
-        await transport.editMessage(chat.chatId, messageId, `Ты уже в ракете! Залетай в общее сообщение посадки ниже.`, [
+        await transport.editMessage(chat.chatId, messageId, `Ты уже в ракете! Настраивай авто-стоп в общем сообщении посадки ниже.`, [
           [{ text: '🏠 В меню', callbackData: 'menu' }]
         ]);
       }
@@ -389,6 +639,7 @@ export async function startOrJoinMultiplayerCrash(
       userId: player.userId,
       firstName: displayName(player),
       stake,
+      targetMult: 2.0,
       isLastDodep,
       isAllIn,
       status: 'flying'
@@ -404,7 +655,7 @@ export async function startOrJoinMultiplayerCrash(
       await transport.editMessage(
         chat.chatId,
         messageId,
-        `🚀 Ты на борту общей ракеты (ставка ${stake} 🪙)! Смотри отсчёт и жми «Забрать» в общем сообщении посадки.`,
+        `🚀 Ты на борту Джет Икса (ставка ${stake} 🪙 · авто-стоп x2.0)! Выбери другой авто-стоп или жми «ВЗЛЁТ СЕЙЧАС!» в общем сообщении.`,
         [[{ text: '🏠 В меню', callbackData: 'menu' }]]
       );
     }
@@ -415,7 +666,7 @@ export async function startOrJoinMultiplayerCrash(
   scheduleSave();
 
   const u = Math.random();
-  let crashPoint = u < 0.05 ? 1.0 : Math.min(35, Math.max(1.08, 0.94 / (1 - u)));
+  let crashPoint = u < 0.04 ? 1.0 : Math.min(35, Math.max(1.12, 0.95 / (1 - u)));
   crashPoint = Math.round(crashPoint * 100) / 100;
 
   const rid = shortId();
@@ -429,6 +680,7 @@ export async function startOrJoinMultiplayerCrash(
         userId: player.userId,
         firstName: displayName(player),
         stake,
+        targetMult: 2.0,
         isLastDodep,
         isAllIn,
         status: 'flying'
@@ -440,6 +692,7 @@ export async function startOrJoinMultiplayerCrash(
     status: 'boarding',
     messageId: messageId || null,
     boardingEndsAt: Date.now() + boardingWindowMs,
+    lastEvents: [],
     boardingTimer: null,
     flyTimer: null,
     transportSource: transport.source,
@@ -481,41 +734,89 @@ export async function handleCrashCallback(
     return;
   }
 
-  if (sub === 'tick' || sub === 'boost') {
+  if (sub === 'target') {
+    if (round.status !== 'boarding') {
+      await transport.answerCallback(callbackId, 'Поздно менять режим — ракета уже в воздухе!', true);
+      return;
+    }
+    const entry = round.entries.find((e) => e.userId === player.userId);
+    if (!entry) {
+      await transport.answerCallback(callbackId, 'Сначала запрыгни на борт кнопкой «➕ ...»!', true);
+      return;
+    }
+    const rawVal = parts[3] || '2';
+    const nextTarget = rawVal === 'manual' ? null : parseFloat(rawVal);
+    if (nextTarget !== null && (Number.isNaN(nextTarget) || nextTarget < 1.1)) {
+      await transport.answerCallback(callbackId, 'Некорректный авто-стоп.', true);
+      return;
+    }
+
+    entry.targetMult = nextTarget;
+    markRuntimeDirty();
+    await transport.answerCallback(
+      callbackId,
+      nextTarget === null
+        ? '🕹️ Включён ручной режим (будешь жать «Забрать» сам в полёте)!'
+        : `🎯 Твой авто-выход установлен на x${nextTarget.toFixed(1).replace(/\.0$/, '')}`
+    );
+    const view = buildCrashBoardingPayload(chat, round);
+    await transport.editMessage(chat.chatId, round.messageId || messageId, view.text, view.keyboard);
+    return;
+  }
+
+  if (sub === 'step' || sub === 'tick' || sub === 'boost') {
     if (round.status === 'boarding') {
-      if (Date.now() >= round.boardingEndsAt) {
-        await transport.answerCallback(callbackId, '🔥 Время вышло — взлетаем!');
-        await launchCrashFlight(chat, round);
-        return;
-      }
       round.boardingTickCount = (round.boardingTickCount || 0) + 1;
       markRuntimeDirty();
-      await transport.answerCallback(callbackId, '⏱ Отсчёт обновлён!');
+      await transport.answerCallback(callbackId, '⏱ Посадка обновлена!');
       const payload = buildCrashBoardingPayload(chat, round);
       await transport.editMessage(chat.chatId, round.messageId || messageId, payload.text, payload.keyboard);
       return;
     }
 
     if (round.status === 'running') {
-      const steps = sub === 'boost' ? 3 : 1;
-      const timeBasedMult = computeCrashMultAtNow(round);
-      const steppedMult = stepCrashMult(round.currentMult, steps);
-      const nextMult = Math.max(timeBasedMult, steppedMult);
+      const reqTarget =
+        sub === 'step'
+          ? parseFloat(parts[3] || '0')
+          : sub === 'boost'
+            ? getNextCrashMilestones(round.currentMult, 3).pop() || getNextCrashMilestone(round.currentMult)
+            : getNextCrashMilestone(round.currentMult);
 
-      if (nextMult >= round.crashPoint) {
-        await transport.answerCallback(callbackId, `💥 Ракета взорвалась на x${round.crashPoint.toFixed(2)}!`, true);
-        await finishCrashRound(chat, round, true);
+      if (Number.isNaN(reqTarget) || reqTarget <= round.currentMult) {
+        await transport.answerCallback(callbackId, `Ракета уже выше этого курса (x${round.currentMult.toFixed(2)})!`);
         return;
       }
 
-      round.currentMult = nextMult;
+      if (reqTarget >= round.crashPoint) {
+        const preCeiling = Math.max(round.currentMult, Math.round((round.crashPoint - 0.01) * 100) / 100);
+        const { autoCollectQueue } = processAutoCashoutsAt(chat, round, preCeiling, true);
+        const anyStillFlying = round.entries.some((e) => e.status === 'flying');
+        await transport.answerCallback(
+          callbackId,
+          anyStillFlying
+            ? `💥 БАБАХ! Ракета взорвалась на x${round.crashPoint.toFixed(2)}!`
+            : `🪂 Все успели выпрыгнуть до x${round.crashPoint.toFixed(2)}!`,
+          anyStillFlying
+        );
+        await finishCrashRound(chat, round, anyStillFlying, autoCollectQueue);
+        return;
+      }
+
+      round.currentMult = reqTarget;
+      const { autoCollectQueue } = processAutoCashoutsAt(chat, round, reqTarget, true);
+      if (!round.entries.some((e) => e.status === 'flying')) {
+        await transport.answerCallback(callbackId, `🪂 Все авто-стопы сработали до x${reqTarget.toFixed(2)}!`);
+        await finishCrashRound(chat, round, false, autoCollectQueue);
+        return;
+      }
+
       markRuntimeDirty();
-      await transport.answerCallback(
-        callbackId,
-        sub === 'boost' ? `⚡ Форсаж! Курс x${round.currentMult.toFixed(2)}` : `🚀 Курс вырос: x${round.currentMult.toFixed(2)}`
-      );
-      const payload = buildCrashFlyingPayload(round);
+      await transport.answerCallback(callbackId, `🚀 Ракета взмыла до x${round.currentMult.toFixed(2)}!`);
+      const payload = buildCrashFlyingPayload(round, true);
       await transport.editMessage(chat.chatId, round.messageId || messageId, payload.text, payload.keyboard);
+      for (const item of autoCollectQueue) {
+        await applyAutoDebtCollection(transport, chat, item.player, item.net);
+      }
       return;
     }
 
@@ -524,9 +825,6 @@ export async function handleCrashCallback(
   }
 
   if (sub === 'join') {
-    if (isServerlessRuntime() && round.status === 'boarding' && Date.now() >= round.boardingEndsAt) {
-      await syncServerlessCrashRound(chat, round);
-    }
     if (round.status !== 'boarding') {
       await transport.answerCallback(callbackId, 'Посадка закрыта — ракета уже в воздухе!', true);
       return;
@@ -557,6 +855,7 @@ export async function handleCrashCallback(
       userId: player.userId,
       firstName: displayName(player),
       stake,
+      targetMult: 2.0,
       isLastDodep: false,
       isAllIn,
       status: 'flying'
@@ -564,7 +863,7 @@ export async function handleCrashCallback(
     markRuntimeDirty();
     scheduleSave();
 
-    await transport.answerCallback(callbackId, `🚀 Ты на борту со ставкой ${stake} 🪙!`);
+    await transport.answerCallback(callbackId, `🚀 Ты на борту (${stake} 🪙 · авто-стоп x2.0)!`);
     const view = buildCrashBoardingPayload(chat, round);
     await transport.editMessage(chat.chatId, round.messageId || messageId, view.text, view.keyboard);
     return;
@@ -576,7 +875,7 @@ export async function handleCrashCallback(
       return;
     }
     if (!round.entries.some((e) => e.userId === player.userId)) {
-      await transport.answerCallback(callbackId, 'Запустить досрочно может пассажир на борту!', true);
+      await transport.answerCallback(callbackId, 'Запустить полёт может пассажир на борту!', true);
       return;
     }
     await transport.answerCallback(callbackId, '🔥 Взлетаем прямо сейчас!');
@@ -600,7 +899,7 @@ export async function handleCrashCallback(
 
     for (const e of round.entries) {
       const p = chat.players[e.userId];
-      if (p) p.balance += e.stake;
+      if (p) refundPlayerStake(p, e.stake, e.isAllIn);
     }
     scheduleSave();
 
@@ -608,24 +907,13 @@ export async function handleCrashCallback(
     await transport.editMessage(
       chat.chatId,
       round.messageId || messageId,
-      `❌ Запуск общей ракеты отменён. Все ставки (${round.entries.length} чел.) возвращены.`,
+      `❌ Запуск Джет Икса отменён. Все ставки (${round.entries.length} чел.) возвращены.`,
       [[{ text: '🏠 В меню', callbackData: 'menu' }]]
     );
     return;
   }
 
   if (sub === 'cash') {
-    if (isServerlessRuntime()) {
-      const state = await syncServerlessCrashRound(chat, round);
-      if (state === 'finished') {
-        await transport.answerCallback(
-          callbackId,
-          `💥 Поздно! Ракета уже взорвалась на x${round.crashPoint.toFixed(2)}.`,
-          true
-        );
-        return;
-      }
-    }
     if (round.status !== 'running') {
       await transport.answerCallback(callbackId, 'Раунд уже завершён!', true);
       return;
@@ -641,51 +929,27 @@ export async function handleCrashCallback(
     }
 
     const winMult = round.currentMult;
-    const payout = Math.round(entry.stake * winMult);
-    const netProfit = payout - entry.stake;
-
-    entry.status = 'cashed';
-    entry.cashedMult = winMult;
-    entry.payout = payout;
-
-    player.balance += payout;
-    player.lastBetAmount = entry.stake;
-    player.lastGameType = 'crash';
-    player.stats.totalWon += Math.max(0, netProfit);
-    if (winMult > player.stats.maxCrashMultiplier) {
-      player.stats.maxCrashMultiplier = winMult;
-    }
-    if (entry.isLastDodep && player.lastActionWasLoss) {
-      player.stats.lastDodepWins += 1;
-    }
-    player.lastActionWasLoss = false;
-    player.lastActionWasLastDodep = false;
-
-    recordGameOutcome(chat, player, 'crash', Math.max(0, netProfit), {
-      isAllIn: entry.isAllIn,
-      isLastDodep: entry.isLastDodep
-    });
-    if (winMult >= 2.0) recordQuestProgress(player, 'crash_x2', 1);
-    if (winMult >= 5.0) unlockAchievement(chat, player, 'astronaut');
+    const { payout, netProfit } = settleCrashPassengerCashout(
+      chat,
+      player,
+      entry,
+      winMult,
+      transport.source
+    );
+    round.lastEvents = [...(round.lastEvents || []), `🪂 ${entry.firstName} забрал x${winMult.toFixed(2)} (+${payout} 🪙)`].slice(-4);
     markRuntimeDirty();
     scheduleSave();
 
     await transport.answerCallback(callbackId, `🪂 Забрал x${winMult.toFixed(2)} (+${payout} 🪙)!`);
-    addBotLog({
-      source: transport.source,
-      chatId: chat.chatId,
-      chatTitle: chat.title,
-      userName: entry.firstName,
-      event: `Краш: Кэшаут x${winMult.toFixed(2)}`,
-      detail: `Ставка ${entry.stake} → Выигрыш ${payout} 🪙`
-    });
 
     const anyStillFlying = round.entries.some((e) => e.status === 'flying');
     if (!anyStillFlying) {
-      await finishCrashRound(chat, round, false);
+      const pending = netProfit > 0 ? [{ player, net: netProfit }] : [];
+      await finishCrashRound(chat, round, false, pending);
     } else {
-      const tick = buildCrashFlyingPayload(round);
+      const tick = buildCrashFlyingPayload(round, true);
       await transport.editMessage(chat.chatId, round.messageId || messageId, tick.text, tick.keyboard);
+      if (netProfit > 0) await applyAutoDebtCollection(transport, chat, player, netProfit);
     }
     return;
   }
@@ -1226,7 +1490,7 @@ export async function handleRpsCallback(
       return;
     }
     const creator = chat.players[lobby.creatorId];
-    if (creator) creator.balance += lobby.stake;
+    if (creator) refundPlayerStake(creator, lobby.stake, lobby.isAllIn);
     lobby.status = 'finished';
     rpsPvpLobbies.delete(sid);
     scheduleSave();
@@ -1626,31 +1890,385 @@ export async function handlePenaltyCallback(
 }
 
 // =====================================
-// 5. PROTECTED MESSAGES & TTL SWEEPER (A3)
+// 5. SCRATCH CARD 3×3 ("🎫 СКРЕТЧ-КАРТА")
+// =====================================
+
+interface ScratchCell {
+  kind: 'crown' | 'gem' | 'coin' | 'lemon' | 'bomb';
+  emoji: string;
+  addMult: number;
+  opened: boolean;
+}
+
+interface ScratchSession {
+  id: string;
+  chatId: string;
+  userId: string;
+  userName: string;
+  stake: number;
+  isLastDodep: boolean;
+  isAllIn: boolean;
+  cells: ScratchCell[]; // 9 cells
+  picksCount: number;
+  currentMult: number;
+  status: 'playing' | 'finished';
+  messageId: string | null;
+  createdAt: number;
+}
+
+const SCRATCH_MAX_PICKS = 4;
+const scratchSessions = new Map<string, ScratchSession>();
+
+function createScratchDeck(): ScratchCell[] {
+  const raw: Omit<ScratchCell, 'opened'>[] = [
+    { kind: 'crown', emoji: '👑', addMult: 2.0 },
+    { kind: 'gem', emoji: '💎', addMult: 0.8 },
+    { kind: 'gem', emoji: '💎', addMult: 0.8 },
+    { kind: 'coin', emoji: '🪙', addMult: 0.5 },
+    { kind: 'coin', emoji: '🪙', addMult: 0.5 },
+    { kind: 'lemon', emoji: '🍋', addMult: 0.3 },
+    { kind: 'lemon', emoji: '🍋', addMult: 0.3 },
+    { kind: 'bomb', emoji: '💣', addMult: 0 },
+    { kind: 'bomb', emoji: '💣', addMult: 0 }
+  ];
+  for (let i = raw.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [raw[i], raw[j]] = [raw[j], raw[i]];
+  }
+  return raw.map((c) => ({ ...c, opened: false }));
+}
+
+function formatScratchRevealGrid(cells: ScratchCell[]): string {
+  const rows: string[] = [];
+  for (let r = 0; r < 3; r++) {
+    const rowCells: string[] = [];
+    for (let c = 0; c < 3; c++) {
+      const cell = cells[r * 3 + c];
+      rowCells.push(cell.opened ? `[${cell.emoji}]` : ` ${cell.emoji} `);
+    }
+    rows.push(rowCells.join(' '));
+  }
+  return rows.join('\n');
+}
+
+function buildScratchPlayingPayload(chat: ChatState, player: PlayerState, session: ScratchSession): {
+  text: string;
+  keyboard: InlineKeyboard;
+} {
+  const potential = Math.round(session.stake * session.currentMult);
+  const lines = [
+    `🎫 СКРЕТЧ-КАРТА 3×3 (ЗОЛОТАЯ СТЁРКА)`,
+    `👤 ${playerLabel(chat, player)} | Билет: ${session.stake} 🪙`,
+    ``,
+    `🎁 Под фольгой спрятано: 👑 +2.0x · 💎×2 +0.8x · 🪙×2 +0.5x · 🍋×2 +0.3x`,
+    `💣 Осторожно: под двумя клетками мины — они сжигают билет!`,
+    ``,
+    `✨ Стёрто клеток: ${session.picksCount}/${SCRATCH_MAX_PICKS} · Накопленный икс: x${session.currentMult.toFixed(2)}${
+      session.picksCount > 0 ? ` (сейчас: ${potential} 🪙)` : ''
+    }`
+  ];
+
+  const kb: InlineKeyboard = [];
+  for (let r = 0; r < 3; r++) {
+    const row: InlineButton[] = [];
+    for (let c = 0; c < 3; c++) {
+      const idx = r * 3 + c;
+      const cell = session.cells[idx];
+      if (cell.opened) {
+        row.push({ text: cell.emoji, callbackData: `sc:nop:${session.id}:${idx}` });
+      } else {
+        row.push({ text: '🎫', callbackData: `sc:pick:${session.id}:${idx}` });
+      }
+    }
+    kb.push(row);
+  }
+
+  if (session.picksCount >= 1) {
+    kb.push([
+      {
+        text: `💰 Забрать куш (${potential} 🪙 · x${session.currentMult.toFixed(2)})`,
+        callbackData: `sc:cash:${session.id}`
+      }
+    ]);
+  }
+
+  return { text: lines.join('\n'), keyboard: kb };
+}
+
+export async function startScratchGame(
+  transport: BotTransport,
+  chat: ChatState,
+  player: PlayerState,
+  stake: number,
+  isLastDodep: boolean,
+  messageId?: string
+): Promise<void> {
+  const isAllIn = deductPlayerStake(player, stake);
+  scheduleSave();
+
+  const sid = shortId();
+  const session: ScratchSession = {
+    id: sid,
+    chatId: chat.chatId,
+    userId: player.userId,
+    userName: displayName(player),
+    stake,
+    isLastDodep,
+    isAllIn,
+    cells: createScratchDeck(),
+    picksCount: 0,
+    currentMult: 0,
+    status: 'playing',
+    messageId: messageId || null,
+    createdAt: Date.now()
+  };
+  scratchSessions.set(sid, session);
+  markRuntimeDirty();
+
+  const payload = buildScratchPlayingPayload(chat, player, session);
+  if (messageId) {
+    await transport.editMessage(chat.chatId, messageId, payload.text, payload.keyboard);
+    session.messageId = messageId;
+  } else {
+    session.messageId = await transport.sendMessage(chat.chatId, payload.text, payload.keyboard);
+  }
+}
+
+async function finishScratchCashout(
+  transport: BotTransport,
+  chat: ChatState,
+  player: PlayerState,
+  session: ScratchSession,
+  messageId: string,
+  fullStreak: boolean
+): Promise<void> {
+  session.status = 'finished';
+  scratchSessions.delete(session.id);
+  markRuntimeDirty();
+
+  const mult = Math.round(session.currentMult * 100) / 100;
+  const payout = Math.round(session.stake * mult);
+  const netProfit = payout - session.stake;
+  const wasLoss = payout < session.stake;
+
+  player.balance += payout;
+  player.lastBetAmount = session.stake;
+  player.lastGameType = 'scratch';
+  if (netProfit > 0) {
+    player.stats.totalWon += netProfit;
+  } else if (netProfit < 0) {
+    player.stats.totalLost += Math.abs(netProfit);
+  }
+  if (session.isLastDodep && player.lastActionWasLoss && !wasLoss) {
+    player.stats.lastDodepWins += 1;
+  }
+  player.lastActionWasLoss = wasLoss;
+  player.lastActionWasLastDodep = false;
+
+  recordGameOutcome(chat, player, 'scratch', netProfit, {
+    isAllIn: session.isAllIn,
+    isLastDodep: session.isLastDodep
+  });
+  scheduleSave();
+
+  addBotLog({
+    source: transport.source,
+    chatId: chat.chatId,
+    chatTitle: chat.title,
+    userName: session.userName,
+    event: fullStreak
+      ? `Скретч-карта: 4/4 (x${mult.toFixed(2)})`
+      : `Скретч-карта: Кэшаут (${session.picksCount}/4 · x${mult.toFixed(2)})`,
+    detail: `Ставка ${session.stake} → Выплата ${payout} 🪙`
+  });
+
+  const phrase = nextPhrase(chat, 'scratchWin');
+  const title = fullStreak
+    ? `🎫 СКРЕТЧ-КАРТА — 🏆 ИДЕАЛЬНЫЕ 4/4!`
+    : `🎫 СКРЕТЧ-КАРТА — 💰 КУШ ЗАБРАН (${session.picksCount}/4)!`;
+  const lines = [
+    title,
+    `👤 ${playerLabel(chat, player)} | Билет: ${session.stake} 🪙`,
+    ``,
+    `🗺 Вскрытие всего билета ([…] — твои стёртые):`,
+    formatScratchRevealGrid(session.cells),
+    ``,
+    `🎁 Итоговый множитель: x${mult.toFixed(2)} → Выплата: +${payout} 🪙 (${netProfit >= 0 ? `+${netProfit}` : netProfit} чистого)`,
+    `🪙 Баланс: ${player.balance} фантиков`,
+    ``,
+    phrase
+  ];
+
+  await transport.editMessage(
+    chat.chatId,
+    messageId,
+    lines.join('\n'),
+    buildPostGameKeyboard('scratch', session.stake, wasLoss, player)
+  );
+  if (netProfit > 0) await applyAutoDebtCollection(transport, chat, player, netProfit);
+}
+
+export async function handleScratchCallback(
+  transport: BotTransport,
+  chat: ChatState,
+  player: PlayerState,
+  callbackId: string,
+  messageId: string,
+  parts: string[]
+): Promise<void> {
+  const sub = parts[1];
+  const sid = parts[2];
+  const session = scratchSessions.get(sid);
+
+  if (!session || session.status !== 'playing') {
+    await transport.answerCallback(callbackId, 'Этот скретч-билет уже закрыт или обналичен.', true);
+    return;
+  }
+  if (session.userId !== player.userId) {
+    await transport.answerCallback(callbackId, 'Это не твой лотерейный билет! Нажми «Скретч-карта» в меню.', true);
+    return;
+  }
+
+  if (sub === 'nop') {
+    await transport.answerCallback(callbackId, 'Эта клетка уже стёрта! Жми на 🎫 или забирай куш.');
+    return;
+  }
+
+  if (sub === 'cash') {
+    if (session.picksCount < 1) {
+      await transport.answerCallback(callbackId, 'Сначала сотри хотя бы одну клетку!', true);
+      return;
+    }
+    await transport.answerCallback(callbackId, `💰 Билет обналичен на x${session.currentMult.toFixed(2)}!`);
+    await finishScratchCashout(transport, chat, player, session, messageId, false);
+    return;
+  }
+
+  if (sub === 'pick') {
+    const idx = parseInt(parts[3] || '-1', 10);
+    const cell = session.cells[idx];
+    if (!cell || cell.opened) {
+      await transport.answerCallback(callbackId, 'Эта клетка уже открыта!');
+      return;
+    }
+
+    cell.opened = true;
+    session.picksCount += 1;
+
+    if (cell.kind === 'bomb') {
+      session.status = 'finished';
+      scratchSessions.delete(sid);
+      markRuntimeDirty();
+
+      player.lastBetAmount = session.stake;
+      player.lastGameType = 'scratch';
+      player.stats.totalLost += session.stake;
+      player.lastActionWasLoss = true;
+      player.lastActionWasLastDodep = false;
+
+      recordGameOutcome(chat, player, 'scratch', -session.stake, {
+        isAllIn: session.isAllIn,
+        isLastDodep: session.isLastDodep
+      });
+      scheduleSave();
+
+      addBotLog({
+        source: transport.source,
+        chatId: chat.chatId,
+        chatTitle: chat.title,
+        userName: session.userName,
+        event: 'Скретч-карта: Подорвался на бомбе',
+        detail: `Потеряно ${session.stake} 🪙 на клетке #${idx + 1}`
+      });
+
+      const phrase = nextPhrase(chat, 'scratchLoss');
+      await transport.answerCallback(callbackId, '💣 БАБАХ! Под фольгой оказалась мина!', true);
+      await transport.editMessage(
+        chat.chatId,
+        messageId,
+        [
+          `🎫 СКРЕТЧ-КАРТА — 💥 ПОДРЫВ НА БОМБЕ!`,
+          `👤 ${playerLabel(chat, player)} | Билет: ${session.stake} 🪙`,
+          ``,
+          `🗺 Вскрытие всего билета ([…] — твои стёртые):`,
+          formatScratchRevealGrid(session.cells),
+          ``,
+          `💣 Попалась мина — билет сгорает (-${session.stake} 🪙)!`,
+          `🪙 Баланс: ${player.balance} фантиков`,
+          ``,
+          phrase
+        ].join('\n'),
+        buildPostGameKeyboard('scratch', session.stake, true, player)
+      );
+      if (player.balance === 0) await maybeSendZeroBalanceOffer(transport, chat, player);
+      return;
+    }
+
+    session.currentMult = Math.round((session.currentMult + cell.addMult) * 100) / 100;
+    markRuntimeDirty();
+
+    if (session.picksCount >= SCRATCH_MAX_PICKS) {
+      await transport.answerCallback(callbackId, `${cell.emoji} +${cell.addMult}x! Все 4/4 клетки открыты!`);
+      await finishScratchCashout(transport, chat, player, session, messageId, true);
+      return;
+    }
+
+    await transport.answerCallback(
+      callbackId,
+      `${cell.emoji} +${cell.addMult.toFixed(1)}x! Итого x${session.currentMult.toFixed(2)}`
+    );
+    const payload = buildScratchPlayingPayload(chat, player, session);
+    await transport.editMessage(chat.chatId, messageId, payload.text, payload.keyboard);
+    return;
+  }
+
+  await transport.answerCallback(callbackId);
+}
+
+// =====================================
+// 6. PROTECTED MESSAGES, SWEEPER & RUNTIME ADAPTER (A3)
 // =====================================
 
 export function isNewGamesProtectedMsg(msgId: string): boolean {
   for (const c of crashRounds.values()) if (c.messageId === msgId) return true;
   for (const r of rpsPvpLobbies.values()) if (r.messageId === msgId) return true;
+  for (const s of scratchSessions.values()) if (s.messageId === msgId) return true;
   return false;
 }
 
 export async function sweepExpiredNewGames(now = Date.now()): Promise<void> {
   const db = getDb();
 
-  // Sync or expire Crash rounds in serverless mode
+  // Refund stale Crash boarding lobbies (4 min) or close stuck flights (6 min)
   for (const round of Array.from(crashRounds.values())) {
     const chat = db.chats[round.chatId];
     if (!chat) {
       crashRounds.delete(round.id);
       continue;
     }
-    if (isServerlessRuntime()) {
-      const state = await syncServerlessCrashRound(chat, round);
-      if (state === 'finished') continue;
-      if (now - round.createdAt >= 8 * 60 * 1000) {
-        await finishCrashRound(chat, round, true);
+    if (round.status === 'boarding' && now - round.createdAt >= LOBBY_IDLE_TTL_MS) {
+      if (round.boardingTimer) clearTimeout(round.boardingTimer);
+      round.status = 'finished';
+      crashRounds.delete(round.id);
+      markRuntimeDirty();
+      for (const e of round.entries) {
+        const p = chat.players[e.userId];
+        if (p) refundPlayerStake(p, e.stake, e.isAllIn);
       }
+      scheduleSave();
+      const tr = getNewGameTransport(round.transportSource, round.chatId, round.transport);
+      if (round.messageId && tr) {
+        await tr.editMessage(
+          round.chatId,
+          round.messageId,
+          `⏱ Посадка Джет Икса закрыта по таймауту (4 мин). Все ставки возвращены.`,
+          [[{ text: '🏠 В меню', callbackData: 'menu' }]]
+        );
+      }
+      continue;
+    }
+    if (round.status === 'running' && now - (round.flightStartedAt || round.createdAt) >= 6 * 60 * 1000) {
+      await finishCrashRound(chat, round, true);
     }
   }
 
@@ -1662,7 +2280,7 @@ export async function sweepExpiredNewGames(now = Date.now()): Promise<void> {
       markRuntimeDirty();
       const chat = db.chats[lobby.chatId];
       const creator = chat?.players[lobby.creatorId];
-      if (creator) creator.balance += lobby.stake;
+      if (creator) refundPlayerStake(creator, lobby.stake, lobby.isAllIn);
       scheduleSave();
       addBotLog({
         source: 'scheduler',
@@ -1694,6 +2312,9 @@ export async function sweepExpiredNewGames(now = Date.now()): Promise<void> {
   for (const [id, s] of penaltySessions.entries()) {
     if (now - s.createdAt >= SOLO_TTL) penaltySessions.delete(id);
   }
+  for (const [id, s] of scratchSessions.entries()) {
+    if (now - s.createdAt >= SOLO_TTL) scratchSessions.delete(id);
+  }
 }
 
 registerRuntimeAdapter('newGames', {
@@ -1710,7 +2331,8 @@ registerRuntimeAdapter('newGames', {
       ...rest,
       transportSource: rest.transportSource || (_tr?.source ?? (rest.chatId.startsWith('sim-') ? 'simulator' : 'telegram'))
     })),
-    penaltySessions: Array.from(penaltySessions.values())
+    penaltySessions: Array.from(penaltySessions.values()),
+    scratchSessions: Array.from(scratchSessions.values())
   }),
   importState: (raw: any) => {
     for (const r of crashRounds.values()) {
@@ -1722,13 +2344,20 @@ registerRuntimeAdapter('newGames', {
     rpsSoloSessions.clear();
     rpsPvpLobbies.clear();
     penaltySessions.clear();
+    scratchSessions.clear();
 
     if (Array.isArray(raw?.crashRounds)) {
       for (const r of raw.crashRounds) {
         if (!r?.id || r.status === 'finished') continue;
         crashRounds.set(r.id, {
           ...r,
-          entries: Array.isArray(r.entries) ? r.entries : [],
+          entries: Array.isArray(r.entries)
+            ? r.entries.map((e: any) => ({
+                ...e,
+                targetMult: e?.targetMult === undefined ? 2.0 : e.targetMult
+              }))
+            : [],
+          lastEvents: Array.isArray(r.lastEvents) ? r.lastEvents : [],
           boardingTimer: null,
           flyTimer: null,
           transport: null
@@ -1762,6 +2391,16 @@ registerRuntimeAdapter('newGames', {
           penaltySessions.set(s.id, {
             ...s,
             history: Array.isArray(s.history) ? s.history : []
+          });
+        }
+      }
+    }
+    if (Array.isArray(raw?.scratchSessions)) {
+      for (const s of raw.scratchSessions) {
+        if (s?.id && s.status === 'playing') {
+          scratchSessions.set(s.id, {
+            ...s,
+            cells: Array.isArray(s.cells) ? s.cells : []
           });
         }
       }

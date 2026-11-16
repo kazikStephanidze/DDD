@@ -170,12 +170,43 @@ export async function sendDailyLotteryDrawBroadcast(
   if (!chat) return false;
 
   const dateStr = forceDate || getTodayDateStr();
+  const todayStr = getTodayDateStr();
   const lot = chat.lottery;
   if (!lot || lot.tickets.length === 0) {
     if (!chat.lottery) chat.lottery = { date: dateStr, tickets: [], lastDrawnDate: dateStr };
-    else chat.lottery.lastDrawnDate = dateStr;
+    else {
+      chat.lottery.date = dateStr;
+      chat.lottery.lastDrawnDate = dateStr;
+    }
     scheduleSave();
-    return false;
+
+    const hasPlayers = Object.keys(chat.players).length > 0;
+    const isPastEmptyDay = Boolean(forceDate && forceDate < todayStr);
+    if (!hasPlayers || isPastEmptyDay) {
+      return false;
+    }
+
+    addBotLog({
+      source: 'scheduler',
+      chatId: chat.chatId,
+      chatTitle: chat.title,
+      event: 'Лотерея 20:55 (Пустой тираж)',
+      detail: 'Никто не купил билеты — тираж не состоялся'
+    });
+    await transport.sendMessage(
+      chat.chatId,
+      [
+        `🎟️ ВЕЧЕРНЯЯ ЛОТЕРЕЯ «ОБЩАК ДНЯ» (20:55)`,
+        ``,
+        `Сегодня никто в чате не взял ни одного билета по ${LOTTERY_TICKET_PRICE} 🪙 — барабан крутить не из чего!`,
+        `💨 Дневной банк остался пустым. Залетайте в завтрашний тираж заранее (🥇 70% / 🥈 20% / 🥉 10%)!`
+      ].join('\n'),
+      [
+        [{ text: `🎟️ Взять билет на завтра (${LOTTERY_TICKET_PRICE} 🪙)`, callbackData: 'lot:menu' }],
+        [{ text: '🏠 В меню', callbackData: 'menu' }]
+      ]
+    );
+    return true;
   }
 
   const tickets = [...lot.tickets];

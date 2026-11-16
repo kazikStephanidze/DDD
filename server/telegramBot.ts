@@ -707,18 +707,18 @@ async function runScheduledBroadcastsForSingleChat(
     }
   }
 
-  // 20:55 Daily Lottery Draw (allow 20:55..23:59 window so cron jitter after 21:30 still draws tonight's pot)
+  // 20:55 Daily Lottery Draw (allow 20:55..23:59 window even when 0 tickets were bought)
   const lotteryWindowOpen = (hour === 20 && minute >= 55) || hour >= 21;
   if (
+    hasPlayers &&
     lotteryWindowOpen &&
-    chat.lottery &&
-    chat.lottery.tickets.length > 0 &&
-    chat.lottery.lastDrawnDate !== dateStr
+    chat.lottery?.lastDrawnDate !== dateStr
   ) {
     try {
       if (chat.type === 'simulator') {
         if (onSimulatorBroadcast) onSimulatorBroadcast('lottery', chat.chatId);
-        chat.lottery.lastDrawnDate = dateStr;
+        if (!chat.lottery) chat.lottery = { date: dateStr, tickets: [], lastDrawnDate: dateStr };
+        else chat.lottery.lastDrawnDate = dateStr;
         ranBroadcasts.push(`lottery:${chat.chatId}`);
       } else if (tgTransport) {
         await sendDailyLotteryDrawBroadcast(tgTransport, chat.chatId, dateStr);
