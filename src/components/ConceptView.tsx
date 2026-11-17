@@ -18,12 +18,12 @@ export function ConceptView({ telegram, timezone }: ConceptViewProps) {
       {/* Section 1: Games */}
       <section className="bg-white border border-slate-200 rounded-xl divide-y divide-slate-200">
         <div className="p-6">
-          <h2 className="text-lg font-bold text-slate-900">1. Двадцать две игры + Аукцион, Общий Котёл, Блиц и Лотерея</h2>
+          <h2 className="text-lg font-bold text-slate-900">1. Двадцать три игры + Титулы, Аукцион, Общий Котёл, Блиц и Лотерея</h2>
           <p className="text-sm text-slate-600 mt-1">
             После команды <span className="font-mono-num font-semibold">/start</span> или{' '}
             <span className="font-mono-num font-semibold">/menu</span> бот удаляет прошлое неактивное меню игрока и дальше работает внутри{' '}
             <strong>одного редактируемого сообщения</strong> (а ошибки и таймеры выводятся во всплывающем тосте). Команда{' '}
-            <span className="font-mono-num font-semibold">/me</span> открывает личный профиль игрока со статистикой и 11 ачивками. Ставки:{' '}
+            <span className="font-mono-num font-semibold">/me</span> открывает личный профиль игрока со статистикой и 14 ачивками. Ставки:{' '}
             <span className="font-mono-num">50, 100, 250, 500, Ва-банк</span>.
           </p>
         </div>
@@ -142,7 +142,7 @@ export function ConceptView({ telegram, timezone }: ConceptViewProps) {
           </div>
 
           <div>
-            <h3 className="font-bold text-slate-900">1.17. Морской бой 4×4 (Соло против Деда и PvP 1×1)</h3>
+            <h3 className="font-bold text-slate-900">1.17. Морской бой 4×4 (Соло против Дяди Депа и PvP 1×1)</h3>
             <p className="mt-1">
               Компактное поле 4×4 с тремя кораблями (4 клетки). Попал — стреляешь ещё! Против Дяди Депа за быстрый потоп даётся бонусный множитель до x3.0 (≤6 выстрелов — x3.0, ≤8 — x2.4, иначе x2.0), а в PvP 1×1 победитель забирает весь банк x2 (свои корабли можно подсмотреть секретной кнопкой).
             </p>
@@ -180,6 +180,13 @@ export function ConceptView({ telegram, timezone }: ConceptViewProps) {
             <h3 className="font-bold text-slate-900">1.22. Скретч-карта 3×3 («Золотая стёрка» · Соло)</h3>
             <p className="mt-1">
               Быстрый лотерейный билет из 9 закрытых клеток: под фольгой спрятаны 👑 (+2.0x), две 💎 (+0.8x), две 🪙 (+0.5x), два 🍋 (+0.3x) и 2 коварные 💣 бомбы (~95.5% RTP). Можно стереть до 4 клеток и забрать накопленный икс кнопкой «💰 Забрать куш» после любого хода — в финале открывается вся карта целиком!
+            </p>
+          </div>
+
+          <div>
+            <h3 className="font-bold text-slate-900">1.23. Костёр Дяди Депа (Сжечь любую сумму фантиков)</h3>
+            <p className="mt-1">
+              Чистый аттракцион для богачей чата: можно подбросить в топку любую сумму кнопкой (от 50 🪙 до 100 000 🪙, половину или весь баланс) либо вписать точное число в чат. Фантики сгорают навсегда ради ачивок и звания <strong>«🔥 Главный кочегар пустоты (Шашлычник на пачках)»</strong> на Доске почёта!
             </p>
           </div>
         </div>

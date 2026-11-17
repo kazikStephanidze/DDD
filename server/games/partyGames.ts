@@ -163,7 +163,7 @@ function buildBattleshipPlayPayload(game: BattleshipGame): { text: string; keybo
       `🚢 Твой флот (подбито ${hitsA.length}/4):`,
       format4x4Ascii(game.sideA, true),
       ``,
-      `🎯 Флот Деда (подбито ${hitsB.length}/4) — жми по воде:`
+      `🎯 Флот Дяди Депа (подбито ${hitsB.length}/4) — жми по воде:`
     );
   } else {
     lines.push(
@@ -226,12 +226,12 @@ export async function startBattleshipMenu(
     `👤 Игрок: ${playerLabel(chat, player)} | Ставка: ${stake} 🪙`,
     ``,
     `Выбери режим:`,
-    `• 🤖 Против Деда — победа до x3.0 (≤6 выстр. x3.0, ≤8 выстр. x2.4, иначе x2.0)`,
+    `• 🤖 Против Дяди Депа — победа до x3.0 (≤6 выстр. x3.0, ≤8 выстр. x2.4, иначе x2.0)`,
     `• ⚔️ PvP 1×1 в чате — победитель забирает весь банк x2!`
   ].join('\n');
 
   const kb: InlineKeyboard = [
-    [{ text: '🤖 Играть против Деда', callbackData: `bs:solo:${stake}:${ldFlag}` }],
+    [{ text: '🤖 Играть против Дяди Депа', callbackData: `bs:solo:${stake}:${ldFlag}` }],
     [{ text: '⚔️ PvP-вызов в чат (1×1)', callbackData: `bs:pvp:${stake}:${ldFlag}` }],
     [{ text: '↩️ В меню игр', callbackData: 'menu:games:pvp' }]
   ];
@@ -302,7 +302,7 @@ export async function handleBattleshipCallback(
         sideA,
         sideB,
         turnUserId: player.userId,
-        lastEventText: '🌊 Залп за тобой! Выбирай клетку на поле Деда.',
+        lastEventText: '🌊 Залп за тобой! Выбирай клетку на поле Дяди Депа.',
         messageId,
         transportSource: transport.source,
         transport,
@@ -311,7 +311,7 @@ export async function handleBattleshipCallback(
       };
       battleshipGames.set(id, game);
       markRuntimeDirty();
-      await transport.answerCallback(callbackId, '⚓ Бой против Деда начался!');
+      await transport.answerCallback(callbackId, '⚓ Бой против Дяди Депа начался!');
       const payload = buildBattleshipPlayPayload(game);
       if (messageId) {
         await transport.editMessage(chat.chatId, messageId, payload.text, payload.keyboard);
@@ -391,7 +391,7 @@ export async function handleBattleshipCallback(
       return;
     }
     if (game.creatorId === player.userId) {
-      await transport.answerCallback(callbackId, 'Нельзя воевать с самим собой — жди соперника или выбери режим против Деда!', true);
+      await transport.answerCallback(callbackId, 'Нельзя воевать с самим собой — жди соперника или выбери режим против Дяди Депа!', true);
       return;
     }
     const ghostMs = getGhostRemainingMs(player);
@@ -516,7 +516,7 @@ export async function handleBattleshipCallback(
           chatTitle: chat.title,
           userName: game.sideA.firstName,
           event: `Морской бой: Победа x${mult.toFixed(1)}`,
-          detail: `Потопил флот Деда за ${game.sideA.shotsTaken} выстр. (+${payout} 🪙)`
+          detail: `Потопил флот Дяди Депа за ${game.sideA.shotsTaken} выстр. (+${payout} 🪙)`
         });
         await transport.answerCallback(callbackId, `💥 ПОТОПИЛ! Победа x${mult.toFixed(1)} (+${payout} 🪙)!`);
         const lines = [
@@ -524,7 +524,7 @@ export async function handleBattleshipCallback(
           `💥 Потоплен весь флот Дяди Депа за ${game.sideA.shotsTaken} выстр.!`,
           `🏆 Множитель: x${mult.toFixed(1)} → +${payout} 🪙 · Баланс: ${player.balance} 🪙`,
           ``,
-          `🎯 Поле Деда:`,
+          `🎯 Поле Дяди Депа:`,
           format4x4Ascii(defender, true)
         ];
         await transport.editMessage(
@@ -590,7 +590,7 @@ export async function handleBattleshipCallback(
     // In Solo mode: if player missed, Ded gets a shot (if player hit, player keeps firing!)
     if (game.mode === 'solo') {
       if (isHit) {
-        game.lastEventText = `💥 ПОПАДАНИЕ! Подбит отсек Деда (${defender.hitsReceived.length}/4). Стреляй ещё!`;
+        game.lastEventText = `💥 ПОПАДАНИЕ! Подбит отсек Дяди Депа (${defender.hitsReceived.length}/4). Стреляй ещё!`;
         await transport.answerCallback(callbackId, '💥 Попадание! Твой ход продолжается!');
       } else {
         // Ded fires 1 shot (smart adjacent targeting if already hit a non-sunk area or random unhit)
@@ -625,15 +625,15 @@ export async function handleBattleshipCallback(
             chatTitle: chat.title,
             userName: game.sideA.firstName,
             event: 'Морской бой: Поражение',
-            detail: `Дед потопил флот игрока (-${game.stake} 🪙)`
+            detail: `Дядя Деп потопил флот игрока (-${game.stake} 🪙)`
           });
-          await transport.answerCallback(callbackId, '💥 Дед накрыл твой последний корабль!');
+          await transport.answerCallback(callbackId, '💥 Дядя Деп накрыл твой последний корабль!');
           const lines = [
             `⚓ МОРСКОЙ БОЙ — ФЛОТ НА ДНЕ!`,
-            `🧔‍♂️ Дядя Деп потопил все твои корабли. Ставка ${game.stake} 🪙 ушла в порт Деда.`,
+            `🧔‍♂️ Дядя Деп потопил все твои корабли. Ставка ${game.stake} 🪙 ушла к Дяде Депу.`,
             `🪙 Баланс: ${player.balance} 🪙`,
             ``,
-            `🎯 Поле Деда (осталось ${defender.ships.length - defender.hitsReceived.length} кл.):`,
+            `🎯 Поле Дяди Депа (осталось ${defender.ships.length - defender.hitsReceived.length} кл.):`,
             format4x4Ascii(defender, true)
           ];
           await transport.editMessage(
@@ -649,7 +649,7 @@ export async function handleBattleshipCallback(
         game.lastEventText = dedHit
           ? `💦 Ты промахнулся! 🔥 Дядя Деп в ответ ПОПАЛ по твоему кораблю (${game.sideA.hitsReceived.length}/4)!`
           : `💦 Оба по воде! Снова твой залп.`;
-        await transport.answerCallback(callbackId, dedHit ? '💦 Мимо! Дед попал в ответ!' : '💦 Мимо, Дед тоже мимо!');
+        await transport.answerCallback(callbackId, dedHit ? '💦 Мимо! Дядя Деп попал в ответ!' : '💦 Мимо, Дядя Деп тоже мимо!');
       }
 
       markRuntimeDirty();

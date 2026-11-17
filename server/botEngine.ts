@@ -99,6 +99,13 @@ import {
   unlockAchievement
 } from './features/profileQuests.js';
 import { handleLotteryCallback } from './features/lottery.js';
+import { handleTitlesCallback } from './features/titles.js';
+import {
+  executeBonfireBurn,
+  handleBonfireCallback,
+  openBonfireMenu,
+  tryHandleBonfireTextInput
+} from './games/bonfire.js';
 import {
   handleCrashCallback,
   handlePenaltyCallback,
@@ -798,8 +805,9 @@ export function buildMainMenuKeyboard(
       ],
       [
         { text: '🎫 Скретч-карта 3×3', callbackData: 'g:scratch' },
-        { text: '↩️ Главное меню', callbackData: 'menu:home' }
-      ]
+        { text: '🔥 Костёр (сжечь)', callbackData: 'g:bonfire' }
+      ],
+      [{ text: '↩️ Главное меню', callbackData: 'menu:home' }]
     ];
   }
 
@@ -845,6 +853,10 @@ export function buildMainMenuKeyboard(
         { text: '📅 Сводка за сутки', callbackData: 'daily_stat' }
       ],
       [
+        { text: '🏷️ Титулы и понты', callbackData: 'tt:menu' },
+        { text: '🔥 Костёр (сжечь)', callbackData: 'g:bonfire' }
+      ],
+      [
         { text: `💸 Бонус (+${ZERO_BONUS_AMOUNT})`, callbackData: 'bonus' },
         { text: '↩️ Главное меню', callbackData: 'menu:home' }
       ]
@@ -864,6 +876,10 @@ export function buildMainMenuKeyboard(
     [
       { text: '🏆 Доска почёта', callbackData: 'top' },
       { text: '📅 Сводка за сутки', callbackData: 'daily_stat' }
+    ],
+    [
+      { text: '🏷️ Титулы и понты', callbackData: 'tt:menu' },
+      { text: '🔥 Костёр (сжечь)', callbackData: 'g:bonfire' }
     ],
     [{ text: `💸 Бонус при нуле (+${ZERO_BONUS_AMOUNT})`, callbackData: 'bonus' }]
   ];
@@ -947,7 +963,7 @@ export function buildLeaderboardText(chat: ChatState): string {
     return `🏆 Доска позора и почета чата «${chat.title}»\n\nПока никто не сделал даже первого депа. Жмите /start!`;
   }
 
-  const TOTAL_NOMINATIONS = 9;
+  const TOTAL_NOMINATIONS = 10;
   const positionCounts = new Map<string, number>();
   const addPoint = (userId?: string) => {
     if (!userId) return;
@@ -1088,6 +1104,14 @@ export function buildLeaderboardText(chat: ChatState): string {
     collectorLine = `🏺 Коллекционер чата: ${formatWinners(colPick.winners)} — ${sampleCol.count} шт. (актив: ${sampleCol.recycleTotal} 🪙${uniqText})`;
   }
 
+  // 10. Chief fantik burner ("Главный кочегар пустоты")
+  const burnPick = pickTopPlayers(players, (p) => p.stats.totalBurned || 0, 1);
+  burnPick.winners.forEach((w) => addPoint(w.userId));
+  const burnLine =
+    burnPick.winners.length > 0
+      ? `🔥 Главный кочегар пустоты (Шашлычник на пачках): ${formatWinners(burnPick.winners)} — спалил ${burnPick.value} 🪙 в пепел`
+      : `🔥 Главный кочегар пустоты (Шашлычник на пачках): спички сухие — никто ещё не жёг бабки (0)`;
+
   const rankedHolders = [...positionCounts.entries()]
     .map(([uid, count]) => ({ player: chat.players[uid], count }))
     .filter((x) => Boolean(x.player))
@@ -1122,6 +1146,7 @@ export function buildLeaderboardText(chat: ChatState): string {
     allInLine,
     bonusLine,
     collectorLine,
+    burnLine,
     ``,
     ...statOfStatsLines,
     ``,
@@ -1348,6 +1373,9 @@ export async function handleTextMessage(
   );
 
   if (!text || text.startsWith('/')) return false;
+  if (await tryHandleBonfireTextInput(transport, chat, player, text)) {
+    return true;
+  }
   const matchedWord = findChatTriggerMatch(text);
   if (!matchedWord) return false;
 
@@ -1789,6 +1817,11 @@ async function handleCallbackUnlocked(
         await transport.answerCallback(callbackId);
         await sendZeroBalanceOffer(transport, chat, player, messageId);
       }
+      return;
+    }
+    if (game === 'bonfire') {
+      await transport.answerCallback(callbackId);
+      await openBonfireMenu(transport, chat, player, messageId);
       return;
     }
     await transport.answerCallback(callbackId);
@@ -2544,6 +2577,18 @@ async function handleCallbackUnlocked(
     return;
   }
 
+  // Titles & Pranks Shop ("Магазин титулов и понтов")
+  if (action === 'tt') {
+    await handleTitlesCallback(transport, chat, player, callbackId, messageId, parts);
+    return;
+  }
+
+  // Bonfire ("Костёр Дяди Депа — Сжечь фантики")
+  if (action === 'bf') {
+    await handleBonfireCallback(transport, chat, player, callbackId, messageId, parts);
+    return;
+  }
+
   await transport.answerCallback(callbackId);
 }
 
@@ -2639,6 +2684,11 @@ async function startGameFlow(
 
   if (game === 'scratch') {
     await startScratchGame(transport, chat, player, stake, isLastDodep, messageId);
+    return;
+  }
+
+  if (game === 'bonfire') {
+    await executeBonfireBurn(transport, chat, player, stake, messageId);
     return;
   }
 

@@ -30,7 +30,8 @@ export type GameType =
   | 'blindauc'
   | 'liarsdice'
   | 'hotpotato'
-  | 'scratch';
+  | 'scratch'
+  | 'bonfire';
 
 export type TalismanRarity = 'common' | 'rare' | 'epic' | 'legendary' | 'unique';
 
@@ -71,6 +72,7 @@ export interface PlayerStats {
   casesOpened?: number;
   talismansRecycledValue?: number;
   craftsDone?: number;
+  totalBurned?: number;
 }
 
 export type DailyQuestKind =
@@ -168,6 +170,13 @@ export interface PlayerState {
   dailyBaseline?: DailyBaseline;
   dailyQuests?: PlayerDailyQuests | null;
   achievements?: string[];
+  ownedTitles?: string[];
+  equippedTitleId?: string | null;
+  prankTitle?: {
+    titleId: string;
+    fromName: string;
+    expiresAt: number;
+  } | null;
 }
 
 export interface UniqueTalismanOwner {
@@ -888,6 +897,8 @@ export function isOneShotBetCallback(data: string): boolean {
   if (action === 'rps' && (sub === 'pvpnew' || sub === 'pvpjoin' || sub === 'bpick')) return true;
   if (action === 'tl' && sub === 'buy') return true;
   if (action === 'lot' && sub === 'buy') return true;
+  if (action === 'bf' && sub === 'burn') return true;
+  if (action === 'tt' && (sub === 'buy' || sub === 'prank' || sub === 'cleanse')) return true;
   if (action === 'bjt' && (sub === 'new' || sub === 'join')) return true;
   if (action === 'chk' && (sub === 'new' || sub === 'join')) return true;
   if (action === 'ldc' && (sub === 'new' || sub === 'join')) return true;
@@ -1143,7 +1154,8 @@ export function createDefaultPlayer(userId: string, firstName: string, username?
     zeroBonusCount: 0,
     casesOpened: 0,
     talismansRecycledValue: 0,
-    craftsDone: 0
+    craftsDone: 0,
+    totalBurned: 0
   };
   return {
     userId,
@@ -1165,7 +1177,10 @@ export function createDefaultPlayer(userId: string, firstName: string, username?
     lastTalismanIncomeAt: Date.now(),
     dailyBaseline: createBaselineFromPlayer({ balance: STARTING_BALANCE, stats }),
     dailyQuests: null,
-    achievements: []
+    achievements: [],
+    ownedTitles: [],
+    equippedTitleId: null,
+    prankTitle: null
   };
 }
 
@@ -1285,6 +1300,10 @@ export function getOrCreatePlayer(
     if (!p.achievements) p.achievements = [];
     if (p.dailyQuests === undefined) p.dailyQuests = null;
     if (!p.stats.gameCounts) p.stats.gameCounts = {};
+    if (p.stats.totalBurned === undefined) p.stats.totalBurned = 0;
+    if (!Array.isArray(p.ownedTitles)) p.ownedTitles = [];
+    if (p.equippedTitleId === undefined) p.equippedTitleId = null;
+    if (p.prankTitle === undefined) p.prankTitle = null;
   }
   return { chat, player: chat.players[userId], isNew };
 }

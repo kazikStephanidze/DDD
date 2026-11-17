@@ -56,7 +56,10 @@ export const ACHIEVEMENTS_CATALOG: AchievementDef[] = [
   { id: 'alchemist', emoji: '⚗️', title: 'Алхимик общака', desc: 'Скрафтить талисман (контракт 3→1)' },
   { id: 'collector_unique', emoji: '🔴', title: 'Хранитель реликвии', desc: 'Получить Уникальный талисман (1/1)' },
   { id: 'philanthropist', emoji: '🤝', title: 'Кредитор чата', desc: 'Выдать P2P-займ участнику чата' },
-  { id: 'oligarch_5k', emoji: '👑', title: 'Авторитет стола', desc: 'Накопить 5 000+ фантиков на балансе' }
+  { id: 'oligarch_5k', emoji: '👑', title: 'Авторитет стола', desc: 'Накопить 5 000+ фантиков на балансе' },
+  { id: 'title_collector', emoji: '🏷️', title: 'Человек с понтами', desc: 'Купить дорогой титул или пранк-прозвище' },
+  { id: 'pyromaniac', emoji: '🔥', title: 'Кочегар пустоты', desc: 'Сжечь в Костре Дяди Депа от 5 000 🪙 суммарно' },
+  { id: 'mega_pyro', emoji: '🌋', title: 'Миллионер-поджигатель', desc: 'Сжечь в Костре Дяди Депа от 50 000 🪙 суммарно' }
 ];
 
 export const ACHIEVEMENT_BY_ID: Record<string, AchievementDef> = Object.fromEntries(
@@ -373,6 +376,8 @@ export function buildProfileView(chat: ChatState, player: PlayerState): { text: 
     .map((a) => `${a.emoji} ${a.title}`)
     .join(', ');
 
+  const burned = player.stats.totalBurned || 0;
+
   const lines = [
     `🪪 ЛИЧНОЕ ДЕЛО ИГРОКА`,
     `👤 ${playerLabel(chat, player)} · Чат «${chat.title}»`,
@@ -381,6 +386,7 @@ export function buildProfileView(chat: ChatState, player: PlayerState): { text: 
     `📊 Игр сыграно: ${games} | Побед: ${wins} (Винрейт: ${winrate})`,
     `📈 Общий профит: ${netStr} 🪙 (Поднято: +${player.stats.totalWon} / Слито: -${player.stats.totalLost})`,
     `🏆 Лучший занос: +${player.stats.biggestWin || 0} 🪙 | Рекорд Краша: x${player.stats.maxCrashMultiplier.toFixed(2)}`,
+    `🔥 Сожжено в костре Дяди Депа: ${burned} 🪙`,
     `🎮 Любимая игра: ${favGameStr}`,
     `♻️ Ласт-додепов (x2) затащено: ${player.stats.lastDodepWins || 0} | Ва-банков: ${player.stats.allInCount || 0}`,
     ``,
@@ -397,6 +403,10 @@ export function buildProfileView(chat: ChatState, player: PlayerState): { text: 
     [
       { text: `🏅 Все ачивки (${unlockedDefs.length}/${ACHIEVEMENTS_CATALOG.length})`, callbackData: 'me:ach' },
       { text: `📋 Дейлики (${dqDone}/3)`, callbackData: 'dq:menu' }
+    ],
+    [
+      { text: '🏷️ Титулы и понты', callbackData: 'tt:menu' },
+      { text: '🔥 Костёр (сжечь)', callbackData: 'g:bonfire' }
     ],
     [
       { text: '🎒 Шкатулка', callbackData: 'tl:bag:0' },

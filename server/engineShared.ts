@@ -13,6 +13,7 @@ import {
 } from './storage.js';
 import { PhraseCategory, pickNonRepeatingPhrase } from './phrases.js';
 import { TALISMAN_BY_ID } from './talismans.js';
+import { getActiveTitleTag } from './titlesCatalog.js';
 import { markRuntimeDirty, registerRuntimeAdapter } from './runtimeRegistry.js';
 
 export interface InlineButton {
@@ -72,7 +73,8 @@ export const GAME_TITLES: Record<GameType, string> = {
   blindauc: '🎁 Тёмный аукцион (Слепой лот)',
   liarsdice: '🎲 Верю — Не верю (Блеф на костях)',
   hotpotato: '💣 Горячая картошка (Динамит на 2–6 чел.)',
-  scratch: '🎫 Скретч-карта 3×3 (Золотая стёрка)'
+  scratch: '🎫 Скретч-карта 3×3 (Золотая стёрка)',
+  bonfire: '🔥 Костёр Дяди Депа (Сжечь фантики)'
 };
 
 export const GAME_RULES_SHORT: Record<GameType, string> = {
@@ -97,7 +99,8 @@ export const GAME_RULES_SHORT: Record<GameType, string> = {
   blindauc: 'Дядя Деп выставляет запечатанный лот с наводкой: внутри от дырявого носка (x0.2) до слитка (x4.0) и редкого талисмана!',
   liarsdice: 'Блеф на 2–4 игроков (по 3 скрытые кости у каждого)! Смотри свои кости тайно, поднимай заявку или жми «НЕ ВЕРЮ!».',
   hotpotato: 'Динамит на 2–6 игроков со скрытым фитилём! Перекидывай бомбу дальше или подкрути фитиль (-2 заряда, риск самоподрыва). У кого рвануло — платит выжившим!',
-  scratch: 'Скретч-билет 3×3: открой до 4 клеток и собери множитель (👑 +2.0x, 💎 +0.8x, 🪙 +0.5x, 🍋 +0.3x). Под двумя клетками 💣 бомба — забирай куш вовремя!'
+  scratch: 'Скретч-билет 3×3: открой до 4 клеток и собери множитель (👑 +2.0x, 💎 +0.8x, 🪙 +0.5x, 🍋 +0.3x). Под двумя клетками 💣 бомба — забирай куш вовремя!',
+  bonfire: 'Сожги любую сумму фантиков на ветер ради угара, ачивок и звания «Главного кочегара пустоты» на Доске почёта!'
 };
 
 export function shortId(): string {
@@ -228,15 +231,23 @@ export function playerLabel(
     username?: string;
     equippedTalismanId?: string | null;
     talismans?: OwnedTalisman[];
+    equippedTitleId?: string | null;
+    ownedTitles?: string[];
+    prankTitle?: { titleId: string; fromName: string; expiresAt: number } | null;
   }
 ): string {
   const base = displayName(player);
   const badge = getEquippedTalismanEmoji(player);
-  const withBadge = badge ? `${badge} ${base}` : base;
+  const titleTag = getActiveTitleTag(player);
+  const parts: string[] = [];
+  if (badge) parts.push(badge);
+  if (titleTag) parts.push(`[${titleTag.label}]`);
+  parts.push(base);
+  const formatted = parts.join(' ');
   if (player.userId && hasOverdueDebt(chat, player.userId)) {
-    return `${withBadge} 💸[ДОЛЖНИК]`;
+    return `${formatted} 💸[ДОЛЖНИК]`;
   }
-  return withBadge;
+  return formatted;
 }
 
 export function getGhostRemainingMs(player: PlayerState): number {
