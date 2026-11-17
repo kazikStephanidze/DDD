@@ -25,21 +25,29 @@ import {
 } from './runtimeRegistry.js';
 import {
   BOT_MESSAGE_TTL_MS,
-  claimTelegramUpdateId,
+  acquireCallbackLock,
   ensureDatabaseLoaded,
+  evaluateCallbackLock,
   flushDatabaseToFirebase,
   getBotLogs,
   getDb,
   getFirebaseStatus,
   getOrCreateChat,
   getZonedDateTimeParts,
+  hasCachedPhraseArchive,
+  isTelegramUpdateDuplicate,
+  markTelegramUpdateProcessed,
   pruneFirebaseArchives,
+  readCallbackLockState,
+  releaseCallbackLock,
   scheduleSave,
   setLocalPollingPaused,
   setTelegramToken,
   setTimezone
 } from './storage.js';
 import {
+  answerTelegramCallbackDirect,
+  ensureWebhookBotReady,
   getActiveTelegramTransport,
   getTelegramStatus,
   handleTelegramWebhook,
@@ -403,6 +411,11 @@ export function createExpressApp(): express.Express {
 
   app.post('/api/telegram/webhook', async (req, res) => {
     let targetChatId: string | undefined;
+    let cbUserId = '';
+    let cbMsgId = '';
+    let cbData = '';
+    let acquiredLockToken: string | null = null;
+
     try {
       const update = req.body;
       if (!update || typeof update !== 'object') {
@@ -411,29 +424,59 @@ export function createExpressApp(): express.Express {
       }
 
       const updateId = typeof update.update_id === 'number' ? update.update_id : null;
-      if (updateId !== null) {
-        const claimed = await claimTelegramUpdateId(updateId);
-        if (!claimed) {
-          res.status(200).json({ ok: true, duplicate: true });
-          return;
-        }
-      }
-
       const rawChatId =
         update?.message?.chat?.id ??
         update?.callback_query?.message?.chat?.id ??
         update?.edited_message?.chat?.id;
       targetChatId = rawChatId !== undefined && rawChatId !== null ? String(rawChatId) : undefined;
 
-      await ensureDatabaseLoaded({
-        forceRemote: true,
-        targetChatId,
-        includeLogs: false,
-        includePhraseArchive: true
-      });
+      const cbQuery = update?.callback_query;
+      const cbId = cbQuery?.id ? String(cbQuery.id) : '';
+      cbUserId = cbQuery?.from?.id !== undefined ? String(cbQuery.from.id) : '';
+      cbMsgId = cbQuery?.message?.message_id !== undefined ? String(cbQuery.message.message_id) : '';
+      cbData = typeof cbQuery?.data === 'string' ? cbQuery.data : '';
+
+      const [isDuplicate, lockState] = await Promise.all([
+        updateId !== null ? isTelegramUpdateDuplicate(updateId) : Promise.resolve(false),
+        cbQuery && targetChatId && cbUserId
+          ? readCallbackLockState(targetChatId, cbUserId)
+          : Promise.resolve(null),
+        ensureDatabaseLoaded({
+          forceRemote: true,
+          targetChatId,
+          includeLogs: false,
+          includePhraseArchive: !hasCachedPhraseArchive(targetChatId)
+        }),
+        ensureWebhookBotReady()
+      ]);
+
+      if (isDuplicate) {
+        res.status(200).json({ ok: true, duplicate: true });
+        return;
+      }
+
+      if (cbQuery && targetChatId && cbUserId) {
+        const lockEval = evaluateCallbackLock(lockState, cbMsgId, cbData);
+        if (!lockEval.allowed) {
+          await Promise.all([
+            cbId ? answerTelegramCallbackDirect(cbId, lockEval.reason, false) : Promise.resolve(),
+            updateId !== null ? markTelegramUpdateProcessed(updateId) : Promise.resolve()
+          ]);
+          res.status(200).json({ ok: true, debounced: true });
+          return;
+        }
+        const [, token] = await Promise.all([
+          updateId !== null ? markTelegramUpdateProcessed(updateId) : Promise.resolve(),
+          acquireCallbackLock(targetChatId, cbUserId, cbMsgId, cbData)
+        ]);
+        acquiredLockToken = token;
+      } else if (updateId !== null) {
+        await markTelegramUpdateProcessed(updateId);
+      }
+
       const result = await handleTelegramWebhook(update);
       if (targetChatId && !targetChatId.startsWith('sim-')) {
-        await runScheduledTasksForChat(targetChatId).catch((err) => {
+        await runScheduledTasksForChat(targetChatId, { isCallback: Boolean(cbQuery) }).catch((err) => {
           console.warn('[Webhook] Lazy scheduler error:', err?.message || err);
         });
       }
@@ -444,6 +487,10 @@ export function createExpressApp(): express.Express {
       console.error('[Webhook] Error processing Telegram update:', err?.message || err);
       await flushDatabaseToFirebase(false, targetChatId).catch(() => {});
       res.status(200).json({ ok: false, error: err?.message || 'Webhook handler error' });
+    } finally {
+      if (acquiredLockToken && targetChatId && cbUserId) {
+        await releaseCallbackLock(targetChatId, cbUserId, acquiredLockToken, cbMsgId, cbData).catch(() => {});
+      }
     }
   });
 

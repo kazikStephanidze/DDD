@@ -399,6 +399,31 @@ export function getActiveTelegramTransport(): BotTransport | null {
   return null;
 }
 
+export async function ensureWebhookBotReady(): Promise<boolean> {
+  const token = resolveTelegramToken();
+  if (!token) return false;
+  const bot = await getOrCreateWebhookBot(token);
+  return Boolean(bot);
+}
+
+export async function answerTelegramCallbackDirect(
+  callbackId: string,
+  text?: string,
+  showAlert = false
+): Promise<void> {
+  if (!callbackId) return;
+  const bot = webhookBot || activeBot || (resolveTelegramToken() ? new Bot(resolveTelegramToken()) : null);
+  if (!bot) return;
+  try {
+    await bot.api.answerCallbackQuery(callbackId, {
+      text: text ? text.slice(0, 195) : undefined,
+      show_alert: showAlert
+    });
+  } catch {
+    // Ignore expired callback queries
+  }
+}
+
 export async function handleTelegramWebhook(update: any): Promise<{ ok: boolean; error?: string }> {
   const token = resolveTelegramToken();
   if (!token) {
@@ -601,7 +626,7 @@ const BLITZ_COOLDOWN_TOLERANCE_MS = 10 * 60 * 1000; // 10m jitter margin for ext
 const LAZY_CHAT_SCHEDULE_COOLDOWN_MS = 45 * 1000;
 const lastLazyScheduleCheckByChat = new Map<string, number>();
 
-async function cleanupExpiredTelegramMessages(onlyChatId?: string) {
+async function cleanupExpiredTelegramMessages(onlyChatId?: string, limitOverride?: number) {
   const tgTransport = getActiveTelegramTransport();
   if (cleanupInProgress || !tgTransport) return;
   const expiredAll = getExpiredBotMessages();
@@ -612,7 +637,8 @@ async function cleanupExpiredTelegramMessages(onlyChatId?: string) {
 
   cleanupInProgress = true;
   try {
-    const batch = expired.slice(0, onlyChatId ? 30 : 60);
+    const batchLimit = limitOverride ?? (onlyChatId ? 30 : 60);
+    const batch = expired.slice(0, batchLimit);
     const toDelete: typeof batch = [];
     for (const entry of batch) {
       if (entry.chatId.startsWith('sim-')) {
@@ -792,9 +818,13 @@ async function runScheduledBroadcastsForSingleChat(
  * Piggybacked per-chat scheduler invoked on Telegram webhooks on serverless Vercel,
  * so active chats always receive Blitz / 12:00 / 20:55 / 21:00 without waiting for a local PC server.
  */
-export async function runScheduledTasksForChat(chatId: string): Promise<string[]> {
+export async function runScheduledTasksForChat(
+  chatId: string,
+  options?: { isCallback?: boolean }
+): Promise<string[]> {
   if (!chatId || chatId.startsWith('sim-')) return [];
-  await cleanupExpiredTelegramMessages(chatId);
+  // Keep interactive button clicks responsive (at most 1 fast parallel batch of 5 deletes)
+  await cleanupExpiredTelegramMessages(chatId, options?.isCallback ? 5 : 30);
 
   const now = Date.now();
   const prevCheck = lastLazyScheduleCheckByChat.get(chatId) || 0;

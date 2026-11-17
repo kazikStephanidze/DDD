@@ -1,6 +1,7 @@
 import {
   CHAT_TRIGGER_COOLDOWN_MS,
   CHAT_TRIGGER_PROBABILITY,
+  CallbackLockState,
   ChatState,
   GHOST_DURATION_MS,
   GameType,
@@ -19,10 +20,12 @@ import {
   ZERO_BONUS_COOLDOWN_MS,
   addBotLog,
   createBaselineFromPlayer,
+  evaluateCallbackLock,
   getDb,
   getOrCreateChat,
   getOrCreatePlayer,
   getZonedDateTimeParts,
+  isOneShotBetCallback,
   scheduleSave,
   trackBotMessage
 } from './storage.js';
@@ -1509,7 +1512,64 @@ function createForkedPersonalTransport(
   };
 }
 
+const inFlightLocalCallbacks = new Map<string, number>();
+const recentLocalCallbacks = new Map<string, CallbackLockState>();
+
 export async function handleCallback(
+  rawTransport: BotTransport,
+  incomingChat: IncomingChat,
+  incomingUser: IncomingUser,
+  callbackId: string,
+  rawMessageId: string,
+  data: string
+): Promise<void> {
+  const lockKey = `${incomingChat.chatId}:${incomingUser.userId}`;
+  const now = Date.now();
+  const activeStartedAt = inFlightLocalCallbacks.get(lockKey);
+  if (activeStartedAt && now - activeStartedAt < 8500) {
+    await rawTransport.answerCallback(callbackId, '⏳ Подожди, прошлый ход ещё обрабатывается!');
+    return;
+  }
+
+  const recentLock = recentLocalCallbacks.get(lockKey) || null;
+  const lockEval = evaluateCallbackLock(recentLock, rawMessageId, data, now);
+  if (!lockEval.allowed) {
+    await rawTransport.answerCallback(callbackId, lockEval.reason);
+    return;
+  }
+
+  inFlightLocalCallbacks.set(lockKey, now);
+  try {
+    await handleCallbackUnlocked(
+      rawTransport,
+      incomingChat,
+      incomingUser,
+      callbackId,
+      rawMessageId,
+      data
+    );
+  } finally {
+    inFlightLocalCallbacks.delete(lockKey);
+    const doneAt = Date.now();
+    recentLocalCallbacks.set(lockKey, {
+      token: lockKey,
+      lockedAt: now,
+      releasedAt: doneAt,
+      messageId: rawMessageId,
+      data,
+      oneShot: isOneShotBetCallback(data)
+    });
+    if (recentLocalCallbacks.size > 300) {
+      for (const [k, v] of recentLocalCallbacks.entries()) {
+        if (doneAt - (v.releasedAt || v.lockedAt) > 10_000) {
+          recentLocalCallbacks.delete(k);
+        }
+      }
+    }
+  }
+}
+
+async function handleCallbackUnlocked(
   rawTransport: BotTransport,
   incomingChat: IncomingChat,
   incomingUser: IncomingUser,
@@ -3084,7 +3144,7 @@ async function playRouletteSpin(
   const rolledEmoji = rolledColor === 'zer' ? '🟢' : rolledColor === 'red' ? '🔴' : '⚫';
   const rolledName = rolledColor === 'zer' ? 'Зеро' : rolledColor === 'red' ? 'Красное' : 'Чёрное';
 
-  const stepDelay = transport.source === 'telegram' ? 850 : 600;
+  const stepDelay = transport.source === 'telegram' ? (isServerlessRuntime() ? 450 : 650) : 450;
 
   await transport.editMessage(
     chat.chatId,
@@ -3597,7 +3657,7 @@ async function playPlinkoDrop(
     if (r < 5) pathCols.push(slot);
   }
 
-  const stepDelay = transport.source === 'telegram' ? 520 : 350;
+  const stepDelay = transport.source === 'telegram' ? (isServerlessRuntime() ? 300 : 420) : 300;
 
   // Frame 1: Ball enters row 1
   const dir1 = pathCols[1] > pathCols[0] ? '↘️ Вправо' : '↙️ Влево';
@@ -4481,7 +4541,7 @@ async function handleRaceCallback(
     await transport.answerCallback(callbackId, 'Поехали! Болеем за наших!');
 
     const pot = lobby.bets.reduce((s, b) => s + b.amount, 0);
-    const stepDelay = transport.source === 'telegram' ? 1100 : 550;
+    const stepDelay = transport.source === 'telegram' ? (isServerlessRuntime() ? 500 : 850) : 450;
     const winnerLane = pickWeightedRaceWinner();
     const winnerRunner = RACE_RUNNERS[winnerLane];
     const winnerMultTag = Number.isInteger(winnerRunner.mult)

@@ -100,15 +100,31 @@ function generate4x4Ships(): number[] {
   return Array.from(ships).sort((a, b) => a - b);
 }
 
+function normalizeBattleshipSide(raw: any): BattleshipSide {
+  return {
+    userId: String(raw?.userId || ''),
+    firstName: String(raw?.firstName || 'Игрок'),
+    isLastDodep: Boolean(raw?.isLastDodep),
+    isAllIn: Boolean(raw?.isAllIn),
+    ships: Array.isArray(raw?.ships) ? raw.ships : [],
+    hitsReceived: Array.isArray(raw?.hitsReceived) ? raw.hitsReceived : [],
+    missesReceived: Array.isArray(raw?.missesReceived) ? raw.missesReceived : [],
+    shotsTaken: Number(raw?.shotsTaken || 0)
+  };
+}
+
 function format4x4Ascii(side: BattleshipSide, revealShips: boolean): string {
+  const hits = Array.isArray(side.hitsReceived) ? side.hitsReceived : [];
+  const misses = Array.isArray(side.missesReceived) ? side.missesReceived : [];
+  const ships = Array.isArray(side.ships) ? side.ships : [];
   const rows: string[] = [];
   for (let r = 0; r < 4; r++) {
     const line: string[] = [];
     for (let c = 0; c < 4; c++) {
       const idx = r * 4 + c;
-      if (side.hitsReceived.includes(idx)) line.push('💥');
-      else if (side.missesReceived.includes(idx)) line.push('💦');
-      else if (revealShips && side.ships.includes(idx)) line.push('🚢');
+      if (hits.includes(idx)) line.push('💥');
+      else if (misses.includes(idx)) line.push('💦');
+      else if (revealShips && ships.includes(idx)) line.push('🚢');
       else line.push('🌊');
     }
     rows.push(line.join(''));
@@ -124,8 +140,12 @@ function getSoloBattleshipMultiplier(shotsTaken: number): number {
 
 function buildBattleshipPlayPayload(game: BattleshipGame): { text: string; keyboard: InlineKeyboard } {
   const sideB = game.sideB!;
+  const hitsA = Array.isArray(game.sideA.hitsReceived) ? game.sideA.hitsReceived : [];
+  const hitsB = Array.isArray(sideB.hitsReceived) ? sideB.hitsReceived : [];
   const isTurnA = game.turnUserId === game.sideA.userId;
   const targetSide = isTurnA ? sideB : game.sideA;
+  const targetHits = Array.isArray(targetSide.hitsReceived) ? targetSide.hitsReceived : [];
+  const targetMisses = Array.isArray(targetSide.missesReceived) ? targetSide.missesReceived : [];
   const shooterName = isTurnA ? game.sideA.firstName : sideB.firstName;
 
   const lines: string[] = [
@@ -140,15 +160,15 @@ function buildBattleshipPlayPayload(game: BattleshipGame): { text: string; keybo
     lines.push(
       `🎯 Выстрелов: ${game.sideA.shotsTaken} · Текущий бонус за победу: x${curMult.toFixed(1)}`,
       ``,
-      `🚢 Твой флот (подбито ${game.sideA.hitsReceived.length}/4):`,
+      `🚢 Твой флот (подбито ${hitsA.length}/4):`,
       format4x4Ascii(game.sideA, true),
       ``,
-      `🎯 Флот Деда (подбито ${sideB.hitsReceived.length}/4) — жми по воде:`
+      `🎯 Флот Деда (подбито ${hitsB.length}/4) — жми по воде:`
     );
   } else {
     lines.push(
-      `👤 ${game.sideA.firstName}: ${game.sideA.hitsReceived.length}/4 подбито`,
-      `👤 ${sideB.firstName}: ${sideB.hitsReceived.length}/4 подбито`,
+      `👤 ${game.sideA.firstName}: ${hitsA.length}/4 подбито`,
+      `👤 ${sideB.firstName}: ${hitsB.length}/4 подбито`,
       ``,
       `🎯 Сейчас бьёт: ${shooterName} (попал = ещё выстрел!)`
     );
@@ -164,8 +184,8 @@ function buildBattleshipPlayPayload(game: BattleshipGame): { text: string; keybo
     for (let c = 0; c < 4; c++) {
       const idx = r * 4 + c;
       let label = '🌊';
-      if (targetSide.hitsReceived.includes(idx)) label = '💥';
-      else if (targetSide.missesReceived.includes(idx)) label = '💦';
+      if (targetHits.includes(idx)) label = '💥';
+      else if (targetMisses.includes(idx)) label = '💦';
       row.push({ text: label, callbackData: `bs:fire:${game.id}:${idx}` });
     }
     kb.push(row);
@@ -293,7 +313,12 @@ export async function handleBattleshipCallback(
       markRuntimeDirty();
       await transport.answerCallback(callbackId, '⚓ Бой против Деда начался!');
       const payload = buildBattleshipPlayPayload(game);
-      await transport.editMessage(chat.chatId, messageId, payload.text, payload.keyboard);
+      if (messageId) {
+        await transport.editMessage(chat.chatId, messageId, payload.text, payload.keyboard);
+      } else {
+        game.messageId = await transport.sendMessage(chat.chatId, payload.text, payload.keyboard);
+        markRuntimeDirty();
+      }
       return;
     }
 
@@ -309,7 +334,7 @@ export async function handleBattleshipCallback(
       sideB: null,
       turnUserId: player.userId,
       lastEventText: '',
-      messageId,
+      messageId: messageId || null,
       transportSource: transport.source,
       transport,
       createdAt: Date.now(),
@@ -319,7 +344,12 @@ export async function handleBattleshipCallback(
     markRuntimeDirty();
     await transport.answerCallback(callbackId, '⚔️ Вызов на Морской бой открыт!');
     const view = buildBattleshipWaitingPayload(game);
-    await transport.editMessage(chat.chatId, messageId, view.text, view.keyboard);
+    if (messageId) {
+      await transport.editMessage(chat.chatId, messageId, view.text, view.keyboard);
+    } else {
+      game.messageId = await transport.sendMessage(chat.chatId, view.text, view.keyboard);
+      markRuntimeDirty();
+    }
     return;
   }
 
@@ -436,6 +466,11 @@ export async function handleBattleshipCallback(
     const isA = game.turnUserId === game.sideA.userId;
     const attacker = isA ? game.sideA : game.sideB;
     const defender = isA ? game.sideB : game.sideA;
+    if (!Array.isArray(defender.hitsReceived)) defender.hitsReceived = [];
+    if (!Array.isArray(defender.missesReceived)) defender.missesReceived = [];
+    if (!Array.isArray(defender.ships)) defender.ships = [];
+    if (!Array.isArray(attacker.hitsReceived)) attacker.hitsReceived = [];
+    if (!Array.isArray(attacker.missesReceived)) attacker.missesReceived = [];
 
     if (defender.hitsReceived.includes(idx) || defender.missesReceived.includes(idx)) {
       await transport.answerCallback(callbackId, 'Сюда уже стреляли! Выбери целую волну 🌊.', true);
@@ -2198,7 +2233,8 @@ export function isPartyGamesProtectedMsg(msgId: string): boolean {
 export async function sweepExpiredPartyGames(now = Date.now()): Promise<void> {
   const db = getDb();
 
-  // 1. Expired Battleship waiting lobbies (4 min)
+  // 1. Expired Battleship waiting lobbies (4 min) or stalled active games (20 min)
+  const PLAY_IDLE_TTL = 20 * 60 * 1000;
   for (const [id, g] of Array.from(battleshipGames.entries())) {
     if (g.status === 'waiting' && now - g.createdAt >= LOBBY_IDLE_TTL_MS) {
       battleshipGames.delete(id);
@@ -2216,6 +2252,27 @@ export async function sweepExpiredPartyGames(now = Date.now()): Promise<void> {
           `⏱ Вызов на Морской бой закрыт по таймауту (4 мин). Ставка ${g.stake} 🪙 возвращена.`,
           [[{ text: '🏠 В меню', callbackData: 'menu' }]]
         );
+      }
+    } else if (g.status === 'playing' && now - (g.lastActionAt || g.createdAt) >= PLAY_IDLE_TTL) {
+      battleshipGames.delete(id);
+      g.status = 'finished';
+      markRuntimeDirty();
+      if (g.mode === 'pvp') {
+        const chat = db.chats[g.chatId];
+        const pA = chat?.players[g.sideA.userId];
+        if (pA) refundPlayerStake(pA, g.stake, g.sideA.isAllIn);
+        const pB = g.sideB ? chat?.players[g.sideB.userId] : undefined;
+        if (pB && g.sideB) refundPlayerStake(pB, g.stake, g.sideB.isAllIn);
+        scheduleSave();
+        const tr = getPartyTransport(g.transportSource, g.chatId, g.transport);
+        if (g.messageId && tr) {
+          await tr.editMessage(
+            g.chatId,
+            g.messageId,
+            `⏱ Морской бой 1×1 закрыт из-за неактивности (20 мин). Ставки (${g.stake} 🪙) возвращены.`,
+            [[{ text: '🏠 В меню', callbackData: 'menu' }]]
+          );
+        }
       }
     }
   }
@@ -2353,7 +2410,12 @@ registerRuntimeAdapter('partyGames', {
     if (Array.isArray(raw?.battleshipGames)) {
       for (const g of raw.battleshipGames) {
         if (g?.id && g.status !== 'finished') {
-          battleshipGames.set(g.id, { ...g, transport: null });
+          battleshipGames.set(g.id, {
+            ...g,
+            sideA: normalizeBattleshipSide(g.sideA),
+            sideB: g.sideB ? normalizeBattleshipSide(g.sideB) : null,
+            transport: null
+          });
         }
       }
     }
@@ -2374,7 +2436,13 @@ registerRuntimeAdapter('partyGames', {
     if (Array.isArray(raw?.liarsGames)) {
       for (const g of raw.liarsGames) {
         if (g?.id && g.status !== 'finished') {
-          liarsGames.set(g.id, { ...g, seats: Array.isArray(g.seats) ? g.seats : [], transport: null });
+          liarsGames.set(g.id, {
+            ...g,
+            seats: Array.isArray(g.seats)
+              ? g.seats.map((s: any) => ({ ...s, dice: Array.isArray(s?.dice) ? s.dice : [] }))
+              : [],
+            transport: null
+          });
         }
       }
     }

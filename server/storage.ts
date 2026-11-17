@@ -814,13 +814,35 @@ export async function flushDatabaseToFirebase(force = false, targetChatId?: stri
   }
 }
 
-export async function claimTelegramUpdateId(updateId: number): Promise<boolean> {
+export function hasCachedPhraseArchive(chatId?: string): boolean {
+  if (!chatId) return false;
+  const chat = db.chats[chatId];
+  return Boolean(chat && Array.isArray(chat.usedPhraseKeys) && chat.usedPhraseKeys.length > 0);
+}
+
+export async function isTelegramUpdateDuplicate(updateId: number): Promise<boolean> {
   const now = Date.now();
   const cachedAt = processedUpdateIds.get(updateId);
   if (cachedAt && now - cachedAt < UPDATE_DEDUP_TTL_MS) {
+    return true;
+  }
+  if (!isFirebaseConfigured()) {
     return false;
   }
+  try {
+    const existing = await rtdbGet<number>(`depBot/webhookDedup/${updateId}`);
+    if (typeof existing === 'number' && now - existing < UPDATE_DEDUP_TTL_MS) {
+      processedUpdateIds.set(updateId, existing);
+      return true;
+    }
+  } catch (err: any) {
+    console.warn('[Webhook Dedup] RTDB read failed, proceeding open:', err?.message || err);
+  }
+  return false;
+}
 
+export async function markTelegramUpdateProcessed(updateId: number): Promise<void> {
+  const now = Date.now();
   if (processedUpdateIds.size > 500) {
     for (const [id, ts] of processedUpdateIds.entries()) {
       if (now - ts >= UPDATE_DEDUP_TTL_MS || processedUpdateIds.size > 400) {
@@ -830,25 +852,144 @@ export async function claimTelegramUpdateId(updateId: number): Promise<boolean> 
       }
     }
   }
+  processedUpdateIds.set(updateId, now);
+  if (!isFirebaseConfigured()) return;
+  await rtdbPut(`depBot/webhookDedup/${updateId}`, now).catch((err: any) => {
+    console.warn('[Webhook Dedup] RTDB write failed:', err?.message || err);
+  });
+}
 
-  if (!isFirebaseConfigured()) {
-    processedUpdateIds.set(updateId, now);
-    return true;
+export async function claimTelegramUpdateId(updateId: number): Promise<boolean> {
+  if (await isTelegramUpdateDuplicate(updateId)) {
+    return false;
   }
+  await markTelegramUpdateProcessed(updateId);
+  return true;
+}
 
+export interface CallbackLockState {
+  token: string;
+  lockedAt: number;
+  releasedAt?: number;
+  messageId: string;
+  data: string;
+  oneShot?: boolean;
+}
+
+export function isOneShotBetCallback(data: string): boolean {
+  const parts = data.split(':');
+  const action = parts[0];
+  const sub = parts[1];
+  if (action === 'b' || action === 'rep' || action === 'ld' || action === 'rl') return true;
+  if (action === 'pl' && sub === 'go') return true;
+  if (action === 'bs' && (sub === 'solo' || sub === 'pvp' || sub === 'join')) return true;
+  if (action === 'dl' && (sub === 'new' || sub === 'join')) return true;
+  if (action === 'rc' && (sub === 'new' || sub === 'join')) return true;
+  if (action === 'rps' && (sub === 'pvpnew' || sub === 'pvpjoin' || sub === 'bpick')) return true;
+  if (action === 'tl' && sub === 'buy') return true;
+  if (action === 'lot' && sub === 'buy') return true;
+  if (action === 'bjt' && (sub === 'new' || sub === 'join')) return true;
+  if (action === 'chk' && (sub === 'new' || sub === 'join')) return true;
+  if (action === 'ldc' && (sub === 'new' || sub === 'join')) return true;
+  if (action === 'hp' && (sub === 'new' || sub === 'join')) return true;
+  if (action === 'bonus_take') return true;
+  return false;
+}
+
+function cbLockKey(chatId: string, userId: string): string {
+  return `${toRtdbKey(chatId)}_${toRtdbKey(userId)}`;
+}
+
+const activeLocalCbLocks = new Map<string, CallbackLockState>();
+
+export async function readCallbackLockState(
+  chatId: string,
+  userId: string
+): Promise<CallbackLockState | null> {
+  const key = cbLockKey(chatId, userId);
+  const now = Date.now();
+  const local = activeLocalCbLocks.get(key);
+  if (local && !local.releasedAt && now - local.lockedAt < 8500) {
+    return local;
+  }
+  if (!isFirebaseConfigured()) return local || null;
   try {
-    const existing = await rtdbGet<number>(`depBot/webhookDedup/${updateId}`);
-    if (typeof existing === 'number' && now - existing < UPDATE_DEDUP_TTL_MS) {
-      processedUpdateIds.set(updateId, existing);
-      return false;
-    }
-    await rtdbPut(`depBot/webhookDedup/${updateId}`, now);
-    processedUpdateIds.set(updateId, now);
-    return true;
-  } catch (err: any) {
-    console.warn('[Webhook Dedup] RTDB check failed, proceeding open:', err?.message || err);
-    processedUpdateIds.set(updateId, now);
-    return true;
+    const remote = await rtdbGet<CallbackLockState>(`depBot/cbLocks/${key}`);
+    if (!remote) return local || null;
+    if (!local) return remote;
+    return (remote.lockedAt || 0) >= (local.lockedAt || 0) ? remote : local;
+  } catch {
+    return local || null;
+  }
+}
+
+export function evaluateCallbackLock(
+  existing: CallbackLockState | null,
+  messageId: string,
+  data: string,
+  now = Date.now()
+): { allowed: true } | { allowed: false; reason: string } {
+  if (!existing) return { allowed: true };
+  if (existing.lockedAt && !existing.releasedAt && now - existing.lockedAt < 8500) {
+    return { allowed: false, reason: '⏳ Подожди, прошлый ход ещё обрабатывается!' };
+  }
+  if (
+    existing.oneShot &&
+    existing.releasedAt &&
+    now - existing.releasedAt < 3000 &&
+    existing.messageId === messageId &&
+    existing.data === data
+  ) {
+    return { allowed: false, reason: '⏳ Это нажатие уже обработано!' };
+  }
+  return { allowed: true };
+}
+
+export async function acquireCallbackLock(
+  chatId: string,
+  userId: string,
+  messageId: string,
+  data: string
+): Promise<string> {
+  const key = cbLockKey(chatId, userId);
+  const token = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const state: CallbackLockState = {
+    token,
+    lockedAt: Date.now(),
+    messageId,
+    data,
+    oneShot: isOneShotBetCallback(data)
+  };
+  activeLocalCbLocks.set(key, state);
+  if (isFirebaseConfigured()) {
+    await rtdbPut(`depBot/cbLocks/${key}`, state).catch(() => {});
+  }
+  return token;
+}
+
+export async function releaseCallbackLock(
+  chatId: string,
+  userId: string,
+  token: string,
+  messageId: string,
+  data: string
+): Promise<void> {
+  const key = cbLockKey(chatId, userId);
+  const oneShot = isOneShotBetCallback(data);
+  const released: CallbackLockState = {
+    token,
+    lockedAt: Date.now(),
+    releasedAt: Date.now(),
+    messageId,
+    data,
+    oneShot
+  };
+  const current = activeLocalCbLocks.get(key);
+  if (!current || current.token === token) {
+    activeLocalCbLocks.set(key, released);
+  }
+  if (isFirebaseConfigured()) {
+    await rtdbPut(`depBot/cbLocks/${key}`, released).catch(() => {});
   }
 }
 
@@ -887,7 +1028,10 @@ export async function pruneFirebaseArchives(): Promise<void> {
     }
 
     // Prune trackedMessages older than 46 hours (Telegram refuses deletion after 48h anyway)
-    const trackedMap = await rtdbGet<Record<string, TrackedBotMessage>>('depBot/trackedMessages');
+    const [trackedMap, cbLocksMap] = await Promise.all([
+      rtdbGet<Record<string, TrackedBotMessage>>('depBot/trackedMessages'),
+      rtdbGet<Record<string, CallbackLockState>>('depBot/cbLocks')
+    ]);
     if (trackedMap && typeof trackedMap === 'object') {
       const trackedPatch: Record<string, null> = {};
       for (const [key, item] of Object.entries(trackedMap)) {
@@ -902,6 +1046,18 @@ export async function pruneFirebaseArchives(): Promise<void> {
       }
       if (Object.keys(trackedPatch).length > 0) {
         await rtdbPatch('depBot/trackedMessages', trackedPatch);
+      }
+    }
+    if (cbLocksMap && typeof cbLocksMap === 'object') {
+      const lockPatch: Record<string, null> = {};
+      for (const [key, item] of Object.entries(cbLocksMap)) {
+        const ts = item?.releasedAt || item?.lockedAt || 0;
+        if (!item || now - ts > 15 * 60 * 1000) {
+          lockPatch[key] = null;
+        }
+      }
+      if (Object.keys(lockPatch).length > 0) {
+        await rtdbPatch('depBot/cbLocks', lockPatch);
       }
     }
     pruneTrackedMessagesInMemory(now, 400);
