@@ -68,14 +68,15 @@ import {
   InlineKeyboard,
   applyAutoDebtCollection,
   buildPostGameKeyboard,
+  cleanupPlayerPrevMenu,
   deductPlayerStake,
   displayName,
   formatDuration,
   getActiveLoansForBorrower,
   getActiveLoansForLender,
+  getChatTopMsgId,
   getGhostRemainingMs,
   getMessageOwner,
-  getPlayerActiveMenuMsgId,
   getRemainingDebt,
   getTotalRemainingDebt,
   isLoanOverdue,
@@ -83,9 +84,11 @@ import {
   nextPhrase,
   playerLabel,
   refundPlayerStake,
+  registerPersonalMenuMsg,
+  registerProtectedMsgChecker,
   sendZeroBalanceOffer,
+  setChatTopMsgId,
   setMessageOwner,
-  setPlayerActiveMenuMsgId,
   shortId,
   sleep
 } from './engineShared.js';
@@ -389,6 +392,8 @@ export function isProtectedInteractiveMessage(msgId: string): boolean {
   }
   return false;
 }
+
+registerProtectedMsgChecker(isProtectedInteractiveMessage);
 
 export async function sweepExpiredLobbies(): Promise<void> {
   const now = Date.now();
@@ -1324,35 +1329,35 @@ export async function handleCommand(
 
   const cmd = command.split('@')[0].toLowerCase();
   if (cmd === '/start' || cmd === '/menu') {
-    const prevMenuId = getPlayerActiveMenuMsgId(chat.chatId, player.userId);
-    if (prevMenuId && !isProtectedInteractiveMessage(prevMenuId) && transport.deleteMessage) {
-      await transport.deleteMessage(chat.chatId, prevMenuId);
-    }
+    await cleanupPlayerPrevMenu(transport, chat.chatId, player.userId);
     const newMsgId = await transport.sendMessage(
       chat.chatId,
       buildMainMenuText(chat, player, 'home'),
       buildMainMenuKeyboard('home', getPlayerGameGenre(chat.chatId, player.userId), chat, player)
     );
-    if (newMsgId) {
-      setMessageOwner(chat.chatId, newMsgId, player.userId);
-      setPlayerActiveMenuMsgId(chat.chatId, player.userId, newMsgId);
-    }
+    registerPersonalMenuMsg(chat.chatId, player.userId, newMsgId);
     return;
   }
   if (cmd === '/top') {
-    await transport.sendMessage(chat.chatId, buildLeaderboardText(chat), [
+    const prevTopId = getChatTopMsgId(chat.chatId);
+    if (prevTopId && !isProtectedInteractiveMessage(prevTopId) && transport.deleteMessage) {
+      await transport.deleteMessage(chat.chatId, prevTopId);
+    }
+    const topMsgId = await transport.sendMessage(chat.chatId, buildLeaderboardText(chat), [
       [
         { text: '📅 Сводка за сутки', callbackData: 'daily_stat' },
         { text: '🔄 Обновить', callbackData: 'top' }
       ],
       [{ text: '🏠 В меню', callbackData: 'menu' }]
     ]);
+    setChatTopMsgId(chat.chatId, topMsgId);
     return;
   }
   if (cmd === '/me') {
+    await cleanupPlayerPrevMenu(transport, chat.chatId, player.userId);
     const view = buildProfileView(chat, player);
     const sentId = await transport.sendMessage(chat.chatId, view.text, view.keyboard);
-    setMessageOwner(chat.chatId, sentId, player.userId);
+    registerPersonalMenuMsg(chat.chatId, player.userId, sentId);
   }
 }
 
@@ -1480,22 +1485,13 @@ function createForkedPersonalTransport(
   const cleanupPreviousInactiveMenu = async () => {
     if (cleanedOldMenu) return;
     cleanedOldMenu = true;
-    const prevMenuId = getPlayerActiveMenuMsgId(chatId, userId);
-    if (
-      prevMenuId &&
-      prevMenuId !== foreignMessageId &&
-      !isProtectedInteractiveMessage(prevMenuId) &&
-      base.deleteMessage
-    ) {
-      await base.deleteMessage(chatId, prevMenuId);
-    }
+    await cleanupPlayerPrevMenu(base, chatId, userId, foreignMessageId);
   };
 
   const recordOwnMsg = (sentId: string | null) => {
     if (!sentId) return;
     ownMessageId = sentId;
-    setMessageOwner(chatId, sentId, userId);
-    setPlayerActiveMenuMsgId(chatId, userId, sentId);
+    registerPersonalMenuMsg(chatId, userId, sentId);
   };
 
   return {
@@ -1627,16 +1623,19 @@ async function handleCallbackUnlocked(
       ownerId = player.userId;
     }
 
-    const isPersonalAction = !isSharedOrMultiAction(parts) && !isActiveSoloStepAction(parts);
+    const isShared = isSharedOrMultiAction(parts);
+    const isPersonalAction = !isShared && !isActiveSoloStepAction(parts);
     if (isPersonalAction && ownerId !== player.userId) {
       transport = createForkedPersonalTransport(
         rawTransport,
         chat.chatId,
         player.userId,
         messageId,
-        action === 'menu'
+        true
       );
       messageId = '';
+    } else if (!isShared && messageId && ownerId === player.userId) {
+      setMessageOwner(chat.chatId, messageId, player.userId);
     }
   }
 
@@ -1669,14 +1668,14 @@ async function handleCallbackUnlocked(
     const kb = buildMainMenuKeyboard(section, genre, chat, player);
 
     if (messageId && !isProtectedInteractiveMessage(messageId)) {
-      setMessageOwner(chat.chatId, messageId, player.userId);
-      setPlayerActiveMenuMsgId(chat.chatId, player.userId, messageId);
+      await cleanupPlayerPrevMenu(transport, chat.chatId, player.userId, messageId);
+      registerPersonalMenuMsg(chat.chatId, player.userId, messageId);
       await transport.editMessage(chat.chatId, messageId, text, kb);
     } else {
       const sentId = await transport.sendMessage(chat.chatId, text, kb);
       if (sentId) {
-        setMessageOwner(chat.chatId, sentId, player.userId);
-        setPlayerActiveMenuMsgId(chat.chatId, player.userId, sentId);
+        await cleanupPlayerPrevMenu(transport, chat.chatId, player.userId, sentId);
+        registerPersonalMenuMsg(chat.chatId, player.userId, sentId);
       }
     }
     return;
@@ -4735,9 +4734,11 @@ async function playSlot777(
   const spinBanner = `🎰 ОДНОРУКИЙ ДЯДЯ (СЛОТ 777)\n👤 ${playerLabel(chat, player)} дёргает рычаг на ${stake} 🪙!\n\n⏳ Барабаны раскручиваются...`;
   let panelId = existingMsgId || null;
   if (panelId) {
+    registerPersonalMenuMsg(chat.chatId, player.userId, panelId);
     await transport.editMessage(chat.chatId, panelId, spinBanner);
   } else {
     panelId = await transport.sendMessage(chat.chatId, spinBanner);
+    registerPersonalMenuMsg(chat.chatId, player.userId, panelId);
   }
 
   const slotDice = await transport.sendDice(chat.chatId, '🎰');
@@ -4830,9 +4831,11 @@ async function playSlot777(
 
   const kb = buildPostGameKeyboard('slots', stake, wasLoss, player);
   if (panelId) {
+    registerPersonalMenuMsg(chat.chatId, player.userId, panelId);
     await transport.editMessage(chat.chatId, panelId, finalMsg, kb);
   } else {
-    await transport.sendMessage(chat.chatId, finalMsg, kb);
+    const finalId = await transport.sendMessage(chat.chatId, finalMsg, kb);
+    registerPersonalMenuMsg(chat.chatId, player.userId, finalId);
   }
 
   if (netProfit > 0) {

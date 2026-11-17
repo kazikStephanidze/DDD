@@ -11,6 +11,7 @@ import {
   maybeSendZeroBalanceOffer,
   playerLabel,
   refundPlayerStake,
+  registerPersonalMenuMsg,
   shortId
 } from '../engineShared.js';
 import {
@@ -527,6 +528,7 @@ export async function handleBattleshipCallback(
           `🎯 Поле Дяди Депа:`,
           format4x4Ascii(defender, true)
         ];
+        registerPersonalMenuMsg(chat.chatId, player.userId, game.messageId || messageId);
         await transport.editMessage(
           chat.chatId,
           game.messageId || messageId,
@@ -636,13 +638,13 @@ export async function handleBattleshipCallback(
             `🎯 Поле Дяди Депа (осталось ${defender.ships.length - defender.hitsReceived.length} кл.):`,
             format4x4Ascii(defender, true)
           ];
+          registerPersonalMenuMsg(chat.chatId, player.userId, game.messageId || messageId);
           await transport.editMessage(
             chat.chatId,
             game.messageId || messageId,
             lines.join('\n'),
             buildPostGameKeyboard('battleship', game.stake, true, player)
           );
-          if (player.balance === 0) await maybeSendZeroBalanceOffer(transport, chat, player);
           return;
         }
 

@@ -99,7 +99,8 @@ export const GAME_RULES_SHORT: Record<GameType, string> = {
   blindauc: 'Дядя Деп выставляет запечатанный лот с наводкой: внутри от дырявого носка (x0.2) до слитка (x4.0) и редкого талисмана!',
   liarsdice: 'Блеф на 2–4 игроков (по 3 скрытые кости у каждого)! Смотри свои кости тайно, поднимай заявку или жми «НЕ ВЕРЮ!».',
   hotpotato: 'Динамит на 2–6 игроков со скрытым фитилём! Перекидывай бомбу дальше или подкрути фитиль (-2 заряда, риск самоподрыва). У кого рвануло — платит выжившим!',
-  scratch: 'Скретч-билет 3×3: открой до 4 клеток и собери множитель (👑 +2.0x, 💎 +0.8x, 🪙 +0.5x, 🍋 +0.3x). Под двумя клетками 💣 бомба — забирай куш вовремя!',
+  scratch:
+    'Скретч-билет 3×3: открой до 4 клеток (👑 ×2.0, 💎 ×1.6, 🪙 ×1.35, 🍋 ×1.2) — каждый приз умножает ставку в плюс! Под 3 клетками 💣 мины — забирай куш вовремя (за 4/4 ещё бонус ×1.25)!',
   bonfire: 'Сожги любую сумму фантиков на ветер ради угара, ачивок и звания «Главного кочегара пустоты» на Доске почёта!'
 };
 
@@ -110,15 +111,28 @@ export function shortId(): string {
 const MAX_OWNED_MESSAGE_KEYS = 5000;
 const messageOwnerByKey = new Map<string, string>();
 const playerActiveMenuMsgId = new Map<string, string>();
+const chatTopMsgId = new Map<string, string>();
+
+let protectedMsgChecker: (msgId: string) => boolean = () => false;
+
+export function registerProtectedMsgChecker(fn: (msgId: string) => boolean): void {
+  protectedMsgChecker = fn;
+}
+
+export function isProtectedMsg(msgId: string): boolean {
+  return protectedMsgChecker(msgId);
+}
 
 registerRuntimeAdapter('engineShared', {
   exportState: () => ({
-    messageOwnerByKey: Array.from(messageOwnerByKey.entries()).slice(-200),
-    playerActiveMenuMsgId: Array.from(playerActiveMenuMsgId.entries()).slice(-120)
+    messageOwnerByKey: Array.from(messageOwnerByKey.entries()).slice(-600),
+    playerActiveMenuMsgId: Array.from(playerActiveMenuMsgId.entries()).slice(-300),
+    chatTopMsgId: Array.from(chatTopMsgId.entries()).slice(-150)
   }),
   importState: (raw: any) => {
     messageOwnerByKey.clear();
     playerActiveMenuMsgId.clear();
+    chatTopMsgId.clear();
     if (Array.isArray(raw?.messageOwnerByKey)) {
       for (const [k, v] of raw.messageOwnerByKey) {
         if (typeof k === 'string' && typeof v === 'string') messageOwnerByKey.set(k, v);
@@ -127,6 +141,11 @@ registerRuntimeAdapter('engineShared', {
     if (Array.isArray(raw?.playerActiveMenuMsgId)) {
       for (const [k, v] of raw.playerActiveMenuMsgId) {
         if (typeof k === 'string' && typeof v === 'string') playerActiveMenuMsgId.set(k, v);
+      }
+    }
+    if (Array.isArray(raw?.chatTopMsgId)) {
+      for (const [k, v] of raw.chatTopMsgId) {
+        if (typeof k === 'string' && typeof v === 'string') chatTopMsgId.set(k, v);
       }
     }
   }
@@ -139,7 +158,9 @@ export function setMessageOwner(
 ): void {
   if (!messageId || !userId) return;
   const key = `${chatId}:${messageId}`;
-  if (!messageOwnerByKey.has(key) && messageOwnerByKey.size >= MAX_OWNED_MESSAGE_KEYS) {
+  if (messageOwnerByKey.has(key)) {
+    messageOwnerByKey.delete(key);
+  } else if (messageOwnerByKey.size >= MAX_OWNED_MESSAGE_KEYS) {
     const oldestKey = messageOwnerByKey.keys().next().value;
     if (oldestKey !== undefined) messageOwnerByKey.delete(oldestKey);
   }
@@ -162,7 +183,9 @@ export function setPlayerActiveMenuMsgId(
 ): void {
   if (!messageId || !userId) return;
   const key = `${chatId}:${userId}`;
-  if (!playerActiveMenuMsgId.has(key) && playerActiveMenuMsgId.size >= MAX_OWNED_MESSAGE_KEYS) {
+  if (playerActiveMenuMsgId.has(key)) {
+    playerActiveMenuMsgId.delete(key);
+  } else if (playerActiveMenuMsgId.size >= MAX_OWNED_MESSAGE_KEYS) {
     const oldestKey = playerActiveMenuMsgId.keys().next().value;
     if (oldestKey !== undefined) playerActiveMenuMsgId.delete(oldestKey);
   }
@@ -175,6 +198,44 @@ export function getPlayerActiveMenuMsgId(
   userId: string
 ): string | undefined {
   return playerActiveMenuMsgId.get(`${chatId}:${userId}`);
+}
+
+export function registerPersonalMenuMsg(
+  chatId: string,
+  userId: string,
+  messageId: string | null | undefined
+): void {
+  if (!messageId || !userId) return;
+  setMessageOwner(chatId, messageId, userId);
+  setPlayerActiveMenuMsgId(chatId, userId, messageId);
+}
+
+export async function cleanupPlayerPrevMenu(
+  transport: BotTransport,
+  chatId: string,
+  userId: string,
+  keepMsgId?: string | null
+): Promise<void> {
+  const prevMenuId = getPlayerActiveMenuMsgId(chatId, userId);
+  if (!prevMenuId || prevMenuId === keepMsgId || isProtectedMsg(prevMenuId)) {
+    return;
+  }
+  playerActiveMenuMsgId.delete(`${chatId}:${userId}`);
+  markRuntimeDirty();
+  if (transport.deleteMessage) {
+    await transport.deleteMessage(chatId, prevMenuId);
+  }
+}
+
+export function getChatTopMsgId(chatId: string): string | undefined {
+  return chatTopMsgId.get(chatId);
+}
+
+export function setChatTopMsgId(chatId: string, messageId: string | null | undefined): void {
+  if (!chatId || !messageId) return;
+  if (chatTopMsgId.has(chatId)) chatTopMsgId.delete(chatId);
+  chatTopMsgId.set(chatId, messageId);
+  markRuntimeDirty();
 }
 
 export function sleep(ms: number): Promise<void> {
@@ -349,10 +410,12 @@ export async function sendZeroBalanceOffer(
   ];
 
   if (existingMsgId) {
+    registerPersonalMenuMsg(chat.chatId, player.userId, existingMsgId);
     await transport.editMessage(chat.chatId, existingMsgId, offerText, kb);
   } else {
+    await cleanupPlayerPrevMenu(transport, chat.chatId, player.userId);
     const sentId = await transport.sendMessage(chat.chatId, offerText, kb);
-    setMessageOwner(chat.chatId, sentId, player.userId);
+    registerPersonalMenuMsg(chat.chatId, player.userId, sentId);
   }
 }
 
@@ -435,7 +498,7 @@ export async function applyAutoDebtCollection(
     detail: `Списано ${totalCollected} 🪙 с выигрыша в счёт P2P долгов`
   });
 
-  await transport.sendMessage(
+  const sentCollectorId = await transport.sendMessage(
     chat.chatId,
     [
       `💼 КОЛЛЕКТОР ДЯДЯ ДЕП НА СВЯЗИ!`,
@@ -452,6 +515,7 @@ export async function applyAutoDebtCollection(
       ]
     ]
   );
+  setMessageOwner(chat.chatId, sentCollectorId, player.userId);
 }
 
 export function getTodayDateStr(): string {

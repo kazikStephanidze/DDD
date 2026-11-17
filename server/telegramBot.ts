@@ -652,7 +652,7 @@ async function cleanupExpiredTelegramMessages(onlyChatId?: string, limitOverride
       toDelete.push(entry);
     }
 
-    const CHUNK = 5;
+    const CHUNK = 10;
     for (let i = 0; i < toDelete.length; i += CHUNK) {
       const slice = toDelete.slice(i, i + CHUNK);
       await Promise.allSettled(
@@ -823,8 +823,8 @@ export async function runScheduledTasksForChat(
   options?: { isCallback?: boolean }
 ): Promise<string[]> {
   if (!chatId || chatId.startsWith('sim-')) return [];
-  // Keep interactive button clicks responsive (at most 1 fast parallel batch of 5 deletes)
-  await cleanupExpiredTelegramMessages(chatId, options?.isCallback ? 5 : 30);
+  // Keep interactive button clicks responsive (at most 1 fast parallel batch)
+  await cleanupExpiredTelegramMessages(chatId, options?.isCallback ? 12 : 30);
 
   const now = Date.now();
   const prevCheck = lastLazyScheduleCheckByChat.get(chatId) || 0;

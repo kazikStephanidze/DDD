@@ -1,15 +1,19 @@
 import {
   BotTransport,
   InlineKeyboard,
+  cleanupPlayerPrevMenu,
   displayName,
   formatDuration,
   getGhostRemainingMs,
-  maybeSendZeroBalanceOffer,
-  playerLabel
+  isProtectedMsg,
+  playerLabel,
+  registerPersonalMenuMsg
 } from '../engineShared.js';
 import {
   ChatState,
   PlayerState,
+  ZERO_BONUS_AMOUNT,
+  ZERO_BONUS_COOLDOWN_MS,
   addBotLog,
   scheduleSave
 } from '../storage.js';
@@ -136,9 +140,12 @@ export async function openBonfireMenu(
   ]);
 
   if (messageId) {
+    registerPersonalMenuMsg(chat.chatId, player.userId, messageId);
     await transport.editMessage(chat.chatId, messageId, lines.join('\n'), kb);
   } else {
-    await transport.sendMessage(chat.chatId, lines.join('\n'), kb);
+    await cleanupPlayerPrevMenu(transport, chat.chatId, player.userId);
+    const sentId = await transport.sendMessage(chat.chatId, lines.join('\n'), kb);
+    registerPersonalMenuMsg(chat.chatId, player.userId, sentId);
   }
 }
 
@@ -213,6 +220,8 @@ export async function executeBonfireBurn(
     comment
   ];
 
+  const elapsedZero = Date.now() - player.lastZeroBonusAt;
+  const zeroBonusReady = player.lastZeroBonusAt === 0 || elapsedZero >= ZERO_BONUS_COOLDOWN_MS;
   const kb: InlineKeyboard =
     player.balance > 0
       ? [
@@ -227,19 +236,23 @@ export async function executeBonfireBurn(
         ]
       : [
           [
+            zeroBonusReady
+              ? { text: `🤲 Бонус при нуле (+${ZERO_BONUS_AMOUNT} 🪙)`, callbackData: 'bonus_take' }
+              : { text: '🙏 Попросить в долг', callbackData: 'ln:ask' }
+          ],
+          [
             { text: '🏆 Доска почёта', callbackData: 'top' },
             { text: '🏠 В меню', callbackData: 'menu' }
           ]
         ];
 
   if (messageId) {
+    registerPersonalMenuMsg(chat.chatId, player.userId, messageId);
     await transport.editMessage(chat.chatId, messageId, lines.join('\n'), kb);
   } else {
-    await transport.sendMessage(chat.chatId, lines.join('\n'), kb);
-  }
-
-  if (player.balance === 0) {
-    await maybeSendZeroBalanceOffer(transport, chat, player);
+    await cleanupPlayerPrevMenu(transport, chat.chatId, player.userId);
+    const sentId = await transport.sendMessage(chat.chatId, lines.join('\n'), kb);
+    registerPersonalMenuMsg(chat.chatId, player.userId, sentId);
   }
 }
 
@@ -348,15 +361,22 @@ export async function tryHandleBonfireTextInput(
   pendingCustomBurnByKey.delete(key);
   markRuntimeDirty();
 
+  const editTargetId = pending.messageId && !isProtectedMsg(pending.messageId) ? pending.messageId : null;
+
   if (!Number.isFinite(amount) || amount <= 0 || amount > player.balance) {
-    await transport.sendMessage(
-      chat.chatId,
-      `⚠️ ${playerLabel(chat, player)}, нужно число от 1 до ${fmtCoins(player.balance)} 🪙! Нажми «🔥 Костёр» заново.`,
-      [[{ text: '🔥 Открыть Костёр', callbackData: 'bf:menu' }]]
-    );
+    const errText = `⚠️ ${playerLabel(chat, player)}, нужно число от 1 до ${fmtCoins(player.balance)} 🪙! Нажми «🔥 Костёр» заново.`;
+    const errKb: InlineKeyboard = [[{ text: '🔥 Открыть Костёр', callbackData: 'bf:menu' }, { text: '🏠 В меню', callbackData: 'menu' }]];
+    if (editTargetId) {
+      registerPersonalMenuMsg(chat.chatId, player.userId, editTargetId);
+      await transport.editMessage(chat.chatId, editTargetId, errText, errKb);
+    } else {
+      await cleanupPlayerPrevMenu(transport, chat.chatId, player.userId);
+      const sentId = await transport.sendMessage(chat.chatId, errText, errKb);
+      registerPersonalMenuMsg(chat.chatId, player.userId, sentId);
+    }
     return true;
   }
 
-  await executeBonfireBurn(transport, chat, player, amount, null);
+  await executeBonfireBurn(transport, chat, player, amount, editTargetId);
   return true;
 }

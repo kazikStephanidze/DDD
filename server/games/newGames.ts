@@ -12,6 +12,7 @@ import {
   nextPhrase,
   playerLabel,
   refundPlayerStake,
+  registerPersonalMenuMsg,
   shortId,
   sleep
 } from '../engineShared.js';
@@ -1145,8 +1146,6 @@ export async function handleThimblesCallback(
 
   if (netProfit > 0) {
     await applyAutoDebtCollection(transport, chat, player, netProfit);
-  } else if (player.balance === 0) {
-    await maybeSendZeroBalanceOffer(transport, chat, player);
   }
 }
 
@@ -1367,8 +1366,6 @@ export async function handleRpsCallback(
 
     if (outcome === 'win') {
       await applyAutoDebtCollection(transport, chat, player, session.stake);
-    } else if (outcome === 'loss' && player.balance === 0) {
-      await maybeSendZeroBalanceOffer(transport, chat, player);
     }
     return;
   }
@@ -1826,7 +1823,6 @@ export async function handlePenaltyCallback(
         ].join('\n'),
         buildPostGameKeyboard('penalty', session.stake, true, player)
       );
-      if (player.balance === 0) await maybeSendZeroBalanceOffer(transport, chat, player);
       return;
     }
 
@@ -1896,7 +1892,8 @@ export async function handlePenaltyCallback(
 interface ScratchCell {
   kind: 'crown' | 'gem' | 'coin' | 'lemon' | 'bomb';
   emoji: string;
-  addMult: number;
+  multFactor: number;
+  addMult?: number;
   opened: boolean;
 }
 
@@ -1917,19 +1914,29 @@ interface ScratchSession {
 }
 
 const SCRATCH_MAX_PICKS = 4;
+const SCRATCH_FULL_STREAK_BONUS = 1.25;
 const scratchSessions = new Map<string, ScratchSession>();
+
+function getScratchCellFactor(cell: ScratchCell): number {
+  if (typeof cell.multFactor === 'number') return cell.multFactor;
+  if (cell.kind === 'bomb') return 0;
+  if (typeof cell.addMult === 'number' && cell.addMult > 0) {
+    return Math.max(1.2, Math.round((1 + cell.addMult) * 100) / 100);
+  }
+  return 1.2;
+}
 
 function createScratchDeck(): ScratchCell[] {
   const raw: Omit<ScratchCell, 'opened'>[] = [
-    { kind: 'crown', emoji: '👑', addMult: 2.0 },
-    { kind: 'gem', emoji: '💎', addMult: 0.8 },
-    { kind: 'gem', emoji: '💎', addMult: 0.8 },
-    { kind: 'coin', emoji: '🪙', addMult: 0.5 },
-    { kind: 'coin', emoji: '🪙', addMult: 0.5 },
-    { kind: 'lemon', emoji: '🍋', addMult: 0.3 },
-    { kind: 'lemon', emoji: '🍋', addMult: 0.3 },
-    { kind: 'bomb', emoji: '💣', addMult: 0 },
-    { kind: 'bomb', emoji: '💣', addMult: 0 }
+    { kind: 'crown', emoji: '👑', multFactor: 2.0 },
+    { kind: 'gem', emoji: '💎', multFactor: 1.6 },
+    { kind: 'coin', emoji: '🪙', multFactor: 1.35 },
+    { kind: 'coin', emoji: '🪙', multFactor: 1.35 },
+    { kind: 'lemon', emoji: '🍋', multFactor: 1.2 },
+    { kind: 'lemon', emoji: '🍋', multFactor: 1.2 },
+    { kind: 'bomb', emoji: '💣', multFactor: 0 },
+    { kind: 'bomb', emoji: '💣', multFactor: 0 },
+    { kind: 'bomb', emoji: '💣', multFactor: 0 }
   ];
   for (let i = raw.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
@@ -1955,17 +1962,22 @@ function buildScratchPlayingPayload(chat: ChatState, player: PlayerState, sessio
   text: string;
   keyboard: InlineKeyboard;
 } {
-  const potential = Math.round(session.stake * session.currentMult);
+  const mult = Math.round(session.currentMult * 100) / 100;
+  const potential = Math.round(session.stake * mult);
+  const netNow = potential - session.stake;
+  const statusLine =
+    session.picksCount === 0
+      ? `✨ Стёрто клеток: 0/${SCRATCH_MAX_PICKS} · Каждая призовая сразу даёт от ×1.20 до ×2.00!`
+      : `✨ Стёрто клеток: ${session.picksCount}/${SCRATCH_MAX_PICKS} · Икс: x${mult.toFixed(2)} (кэшаут: ${potential} 🪙 · ${netNow >= 0 ? `+${netNow}` : netNow} чистого)`;
+
   const lines = [
     `🎫 СКРЕТЧ-КАРТА 3×3 (ЗОЛОТАЯ СТЁРКА)`,
     `👤 ${playerLabel(chat, player)} | Билет: ${session.stake} 🪙`,
     ``,
-    `🎁 Под фольгой спрятано: 👑 +2.0x · 💎×2 +0.8x · 🪙×2 +0.5x · 🍋×2 +0.3x`,
-    `💣 Осторожно: под двумя клетками мины — они сжигают билет!`,
+    `🎁 Призы под фольгой: 👑 ×2.0 · 💎 ×1.6 · 🪙×2 ×1.35 · 🍋×2 ×1.2`,
+    `💣 Осторожно: 3 мины сжигают билет! За все 4/4 без мин бонус ×1.25!`,
     ``,
-    `✨ Стёрто клеток: ${session.picksCount}/${SCRATCH_MAX_PICKS} · Накопленный икс: x${session.currentMult.toFixed(2)}${
-      session.picksCount > 0 ? ` (сейчас: ${potential} 🪙)` : ''
-    }`
+    statusLine
   ];
 
   const kb: InlineKeyboard = [];
@@ -1986,7 +1998,7 @@ function buildScratchPlayingPayload(chat: ChatState, player: PlayerState, sessio
   if (session.picksCount >= 1) {
     kb.push([
       {
-        text: `💰 Забрать куш (${potential} 🪙 · x${session.currentMult.toFixed(2)})`,
+        text: `💰 Забрать куш (${potential} 🪙 · x${mult.toFixed(2)})`,
         callbackData: `sc:cash:${session.id}`
       }
     ]);
@@ -2017,7 +2029,7 @@ export async function startScratchGame(
     isAllIn,
     cells: createScratchDeck(),
     picksCount: 0,
-    currentMult: 0,
+    currentMult: 1,
     status: 'playing',
     messageId: messageId || null,
     createdAt: Date.now()
@@ -2027,10 +2039,13 @@ export async function startScratchGame(
 
   const payload = buildScratchPlayingPayload(chat, player, session);
   if (messageId) {
-    await transport.editMessage(chat.chatId, messageId, payload.text, payload.keyboard);
     session.messageId = messageId;
+    registerPersonalMenuMsg(chat.chatId, player.userId, messageId);
+    await transport.editMessage(chat.chatId, messageId, payload.text, payload.keyboard);
   } else {
-    session.messageId = await transport.sendMessage(chat.chatId, payload.text, payload.keyboard);
+    const sentId = await transport.sendMessage(chat.chatId, payload.text, payload.keyboard);
+    session.messageId = sentId;
+    registerPersonalMenuMsg(chat.chatId, player.userId, sentId);
   }
 }
 
@@ -2084,7 +2099,7 @@ async function finishScratchCashout(
 
   const phrase = nextPhrase(chat, 'scratchWin');
   const title = fullStreak
-    ? `🎫 СКРЕТЧ-КАРТА — 🏆 ИДЕАЛЬНЫЕ 4/4!`
+    ? `🎫 СКРЕТЧ-КАРТА — 🏆 ИДЕАЛЬНЫЕ 4/4 (бонус ×1.25)!`
     : `🎫 СКРЕТЧ-КАРТА — 💰 КУШ ЗАБРАН (${session.picksCount}/4)!`;
   const lines = [
     title,
@@ -2099,12 +2114,23 @@ async function finishScratchCashout(
     phrase
   ];
 
-  await transport.editMessage(
-    chat.chatId,
-    messageId,
-    lines.join('\n'),
-    buildPostGameKeyboard('scratch', session.stake, wasLoss, player)
-  );
+  const targetMsgId = messageId || session.messageId;
+  if (targetMsgId) {
+    registerPersonalMenuMsg(chat.chatId, player.userId, targetMsgId);
+    await transport.editMessage(
+      chat.chatId,
+      targetMsgId,
+      lines.join('\n'),
+      buildPostGameKeyboard('scratch', session.stake, wasLoss, player)
+    );
+  } else {
+    const sentId = await transport.sendMessage(
+      chat.chatId,
+      lines.join('\n'),
+      buildPostGameKeyboard('scratch', session.stake, wasLoss, player)
+    );
+    registerPersonalMenuMsg(chat.chatId, player.userId, sentId);
+  }
   if (netProfit > 0) await applyAutoDebtCollection(transport, chat, player, netProfit);
 }
 
@@ -2128,6 +2154,10 @@ export async function handleScratchCallback(
     await transport.answerCallback(callbackId, 'Это не твой лотерейный билет! Нажми «Скретч-карта» в меню.', true);
     return;
   }
+  const activeMsgId = messageId || session.messageId || '';
+  if (activeMsgId) {
+    registerPersonalMenuMsg(chat.chatId, player.userId, activeMsgId);
+  }
 
   if (sub === 'nop') {
     await transport.answerCallback(callbackId, 'Эта клетка уже стёрта! Жми на 🎫 или забирай куш.');
@@ -2140,7 +2170,7 @@ export async function handleScratchCallback(
       return;
     }
     await transport.answerCallback(callbackId, `💰 Билет обналичен на x${session.currentMult.toFixed(2)}!`);
-    await finishScratchCashout(transport, chat, player, session, messageId, false);
+    await finishScratchCashout(transport, chat, player, session, activeMsgId, false);
     return;
   }
 
@@ -2185,7 +2215,7 @@ export async function handleScratchCallback(
       await transport.answerCallback(callbackId, '💣 БАБАХ! Под фольгой оказалась мина!', true);
       await transport.editMessage(
         chat.chatId,
-        messageId,
+        activeMsgId,
         [
           `🎫 СКРЕТЧ-КАРТА — 💥 ПОДРЫВ НА БОМБЕ!`,
           `👤 ${playerLabel(chat, player)} | Билет: ${session.stake} 🪙`,
@@ -2200,25 +2230,30 @@ export async function handleScratchCallback(
         ].join('\n'),
         buildPostGameKeyboard('scratch', session.stake, true, player)
       );
-      if (player.balance === 0) await maybeSendZeroBalanceOffer(transport, chat, player);
       return;
     }
 
-    session.currentMult = Math.round((session.currentMult + cell.addMult) * 100) / 100;
+    const factor = getScratchCellFactor(cell);
+    const baseMult = session.picksCount <= 1 || session.currentMult <= 0 ? 1 : session.currentMult;
+    session.currentMult = Math.round(baseMult * factor * 100) / 100;
     markRuntimeDirty();
 
     if (session.picksCount >= SCRATCH_MAX_PICKS) {
-      await transport.answerCallback(callbackId, `${cell.emoji} +${cell.addMult}x! Все 4/4 клетки открыты!`);
-      await finishScratchCashout(transport, chat, player, session, messageId, true);
+      session.currentMult = Math.round(session.currentMult * SCRATCH_FULL_STREAK_BONUS * 100) / 100;
+      await transport.answerCallback(
+        callbackId,
+        `${cell.emoji} ×${factor.toFixed(2)}! Все 4/4 (+×1.25 бонус = x${session.currentMult.toFixed(2)})!`
+      );
+      await finishScratchCashout(transport, chat, player, session, activeMsgId, true);
       return;
     }
 
     await transport.answerCallback(
       callbackId,
-      `${cell.emoji} +${cell.addMult.toFixed(1)}x! Итого x${session.currentMult.toFixed(2)}`
+      `${cell.emoji} ×${factor.toFixed(2)}! Куш: x${session.currentMult.toFixed(2)}`
     );
     const payload = buildScratchPlayingPayload(chat, player, session);
-    await transport.editMessage(chat.chatId, messageId, payload.text, payload.keyboard);
+    await transport.editMessage(chat.chatId, activeMsgId, payload.text, payload.keyboard);
     return;
   }
 
@@ -2354,7 +2389,7 @@ registerRuntimeAdapter('newGames', {
           entries: Array.isArray(r.entries)
             ? r.entries.map((e: any) => ({
                 ...e,
-                targetMult: e?.targetMult === undefined ? 2.0 : e.targetMult
+                targetMult: e?.targetMult ?? null
               }))
             : [],
           lastEvents: Array.isArray(r.lastEvents) ? r.lastEvents : [],
