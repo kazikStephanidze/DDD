@@ -260,6 +260,10 @@ let dbDirty = false;
 const inFlightLoads = new Map<string, Promise<DatabaseSchema>>();
 const processedUpdateIds = new Map<number, number>();
 const UPDATE_DEDUP_TTL_MS = 15 * 60 * 1000;
+const TRACKED_MESSAGE_MAX_AGE_MS = 46 * 60 * 60 * 1000; // 46h (safely within Telegram 48h delete limit)
+const dirtyTrackedKeys = new Set<string>();
+const deletedTrackedKeys = new Set<string>();
+let clearLegacyMetaTracked = false;
 
 interface FirebaseStoredMeta {
   timezone?: string;
@@ -374,23 +378,69 @@ function normalizeDbSchema(target: DatabaseSchema, onlyChatId?: string): void {
   if (!target.trackedBotMessages) target.trackedBotMessages = [];
 }
 
-function pruneTrackedMessagesInMemory(now = Date.now(), maxKeep = 250): void {
+function trackedMsgKey(chatId: string, messageId: string): string {
+  return `${toRtdbKey(chatId)}_${toRtdbKey(messageId)}`;
+}
+
+function pruneTrackedMessagesInMemory(now = Date.now(), maxKeep = 400): void {
   if (!db.trackedBotMessages || db.trackedBotMessages.length === 0) return;
-  const staleCutoff = BOT_MESSAGE_TTL_MS * 2; // 10 min safe upper bound
   const active = db.trackedBotMessages.filter((m) => {
     const exp = m.expiresAt ?? m.sentAt + BOT_MESSAGE_TTL_MS;
-    return now - exp < staleCutoff;
+    const isTooOld = now - m.sentAt >= TRACKED_MESSAGE_MAX_AGE_MS || now - exp >= TRACKED_MESSAGE_MAX_AGE_MS;
+    if (isTooOld && !m.chatId.startsWith('sim-')) {
+      deletedTrackedKeys.add(trackedMsgKey(m.chatId, m.messageId));
+    }
+    return !isTooOld;
   });
   db.trackedBotMessages = active.length > maxKeep ? active.slice(-maxKeep) : active;
 }
 
+function mergeRemoteTrackedMessages(
+  remoteMap: Record<string, TrackedBotMessage> | null | undefined,
+  legacyList: TrackedBotMessage[] | null | undefined
+): void {
+  const now = Date.now();
+  const byKey = new Map<string, TrackedBotMessage>();
+  const remoteKeys = new Set<string>();
+
+  if (remoteMap && typeof remoteMap === 'object') {
+    for (const [k, item] of Object.entries(remoteMap)) {
+      if (!item || !item.chatId || !item.messageId) continue;
+      const exp = item.expiresAt ?? item.sentAt + BOT_MESSAGE_TTL_MS;
+      if (now - item.sentAt >= TRACKED_MESSAGE_MAX_AGE_MS || now - exp >= TRACKED_MESSAGE_MAX_AGE_MS) {
+        deletedTrackedKeys.add(k);
+        continue;
+      }
+      remoteKeys.add(k);
+      byKey.set(k, item);
+    }
+  }
+
+  if (Array.isArray(legacyList) && legacyList.length > 0) {
+    clearLegacyMetaTracked = true;
+    for (const item of legacyList) {
+      if (!item || !item.chatId || !item.messageId || item.chatId.startsWith('sim-')) continue;
+      const exp = item.expiresAt ?? item.sentAt + BOT_MESSAGE_TTL_MS;
+      if (now - item.sentAt >= TRACKED_MESSAGE_MAX_AGE_MS || now - exp >= TRACKED_MESSAGE_MAX_AGE_MS) continue;
+      const k = trackedMsgKey(item.chatId, item.messageId);
+      const prev = byKey.get(k);
+      if (!prev || (item.expiresAt ?? 0) > (prev.expiresAt ?? 0)) {
+        byKey.set(k, item);
+      }
+      if (!remoteKeys.has(k)) {
+        dirtyTrackedKeys.add(k);
+      }
+    }
+  }
+
+  db.trackedBotMessages = Array.from(byKey.values()).slice(-400);
+}
+
 function computeMetaHash(): string {
-  pruneTrackedMessagesInMemory();
   return JSON.stringify({
     timezone: db.timezone,
     telegramToken: db.telegramToken || null,
-    localPollingPaused: Boolean(db.localPollingPaused),
-    trackedBotMessages: db.trackedBotMessages || []
+    localPollingPaused: Boolean(db.localPollingPaused)
   });
 }
 
@@ -484,12 +534,14 @@ export async function ensureDatabaseLoaded(options?: {
         const targetId = options.targetChatId;
         const chatKey = toRtdbKey(targetId);
         const wantArchive = options.includePhraseArchive !== false;
+        const wantTracked = !targetId.startsWith('sim-');
 
-        const [meta, remoteChat, remoteArchive, remoteRuntime] = await Promise.all([
+        const [meta, remoteChat, remoteArchive, remoteRuntime, remoteTracked] = await Promise.all([
           rtdbGet<FirebaseStoredMeta>('depBot/meta'),
           rtdbGet<ChatState>(`depBot/chats/${chatKey}`),
           wantArchive ? rtdbGet<FirebasePhraseArchive>(`depBot/phraseArchive/${chatKey}`) : Promise.resolve(null),
-          rtdbGet<Record<string, unknown>>('depBot/runtime')
+          rtdbGet<Record<string, unknown>>('depBot/runtime'),
+          wantTracked ? rtdbGet<Record<string, TrackedBotMessage>>('depBot/trackedMessages') : Promise.resolve(null)
         ]);
 
         lastFirebaseLoadAt = Date.now();
@@ -500,9 +552,11 @@ export async function ensureDatabaseLoaded(options?: {
           db.timezone = meta.timezone || process.env.BOT_TIMEZONE || 'Europe/Minsk';
           db.telegramToken = envToken || meta.telegramToken || db.telegramToken;
           db.localPollingPaused = Boolean(meta.localPollingPaused);
-          db.trackedBotMessages = meta.trackedBotMessages || [];
         } else {
           db.telegramToken = envToken || db.telegramToken;
+        }
+        if (wantTracked) {
+          mergeRemoteTrackedMessages(remoteTracked, meta?.trackedBotMessages);
         }
 
         if (remoteChat) {
@@ -540,15 +594,17 @@ export async function ensureDatabaseLoaded(options?: {
       const wantLogs = options?.includeLogs !== false;
       const wantAllArchives = Boolean(options?.includePhraseArchive);
 
-      const [meta, remoteChats, remoteRuntime, remoteLogsArchive, remoteAllArchives] = await Promise.all([
-        rtdbGet<FirebaseStoredMeta>('depBot/meta'),
-        rtdbGet<Record<string, ChatState>>('depBot/chats'),
-        rtdbGet<Record<string, unknown>>('depBot/runtime'),
-        wantLogs ? rtdbGet<Record<string, BotLogEntry>>('depBot/logsArchive') : Promise.resolve(null),
-        wantAllArchives
-          ? rtdbGet<Record<string, FirebasePhraseArchive>>('depBot/phraseArchive')
-          : Promise.resolve(null)
-      ]);
+      const [meta, remoteChats, remoteRuntime, remoteLogsArchive, remoteAllArchives, remoteTracked] =
+        await Promise.all([
+          rtdbGet<FirebaseStoredMeta>('depBot/meta'),
+          rtdbGet<Record<string, ChatState>>('depBot/chats'),
+          rtdbGet<Record<string, unknown>>('depBot/runtime'),
+          wantLogs ? rtdbGet<Record<string, BotLogEntry>>('depBot/logsArchive') : Promise.resolve(null),
+          wantAllArchives
+            ? rtdbGet<Record<string, FirebasePhraseArchive>>('depBot/phraseArchive')
+            : Promise.resolve(null),
+          rtdbGet<Record<string, TrackedBotMessage>>('depBot/trackedMessages')
+        ]);
 
       lastFirebaseLoadAt = Date.now();
       lastFirebaseSyncAt = lastFirebaseLoadAt;
@@ -577,8 +633,9 @@ export async function ensureDatabaseLoaded(options?: {
           timezone: meta?.timezone || process.env.BOT_TIMEZONE || 'Europe/Minsk',
           telegramToken: envToken || meta?.telegramToken || db.telegramToken,
           localPollingPaused: Boolean(meta?.localPollingPaused),
-          trackedBotMessages: meta?.trackedBotMessages || []
+          trackedBotMessages: []
         };
+        mergeRemoteTrackedMessages(remoteTracked, meta?.trackedBotMessages);
         normalizeDbSchema(db);
 
         if (wantLogs) {
@@ -632,16 +689,47 @@ export async function flushDatabaseToFirebase(force = false, targetChatId?: stri
     return;
   }
 
-  pruneTrackedMessagesInMemory();
   const metaHash = computeMetaHash();
   const patch: Record<string, unknown> = {};
 
   if (force || metaHash !== lastSavedMetaHash) {
     patch['meta/timezone'] = db.timezone;
     patch['meta/localPollingPaused'] = Boolean(db.localPollingPaused);
-    patch['meta/trackedBotMessages'] = db.trackedBotMessages || [];
     if (db.telegramToken && db.telegramToken.trim().length > 0) {
       patch['meta/telegramToken'] = db.telegramToken.trim();
+    }
+  }
+  if (clearLegacyMetaTracked) {
+    patch['meta/trackedBotMessages'] = null;
+  }
+
+  // Atomic per-message trackedMessages delta sync (never overwrites concurrent webhooks)
+  const trackedByKey = new Map<string, TrackedBotMessage>();
+  for (const m of db.trackedBotMessages || []) {
+    if (!m.chatId.startsWith('sim-')) {
+      trackedByKey.set(trackedMsgKey(m.chatId, m.messageId), m);
+    }
+  }
+  const flushedDirtyTracked: string[] = [];
+  const flushedDeletedTracked: string[] = [];
+  if (force) {
+    for (const [k, m] of trackedByKey.entries()) {
+      patch[`trackedMessages/${k}`] = m;
+      flushedDirtyTracked.push(k);
+    }
+  } else {
+    for (const k of dirtyTrackedKeys) {
+      const m = trackedByKey.get(k);
+      if (m) {
+        patch[`trackedMessages/${k}`] = m;
+        flushedDirtyTracked.push(k);
+      }
+    }
+  }
+  for (const k of deletedTrackedKeys) {
+    if (!trackedByKey.has(k)) {
+      patch[`trackedMessages/${k}`] = null;
+      flushedDeletedTracked.push(k);
     }
   }
 
@@ -703,6 +791,9 @@ export async function flushDatabaseToFirebase(force = false, targetChatId?: stri
   try {
     await rtdbPatch('depBot', patch);
     lastSavedMetaHash = metaHash;
+    clearLegacyMetaTracked = false;
+    for (const k of flushedDirtyTracked) dirtyTrackedKeys.delete(k);
+    for (const k of flushedDeletedTracked) deletedTrackedKeys.delete(k);
     for (const [ak, ah] of pendingRuntimeHashes.entries()) {
       lastSavedRuntimeAdapterHashes.set(ak, ah);
     }
@@ -795,15 +886,25 @@ export async function pruneFirebaseArchives(): Promise<void> {
       }
     }
 
-    // Batch-compact stale trackedBotMessages inside meta so it stays tiny on Vercel
-    const prevCount = db.trackedBotMessages?.length || 0;
-    pruneTrackedMessagesInMemory(now, 200);
-    if ((db.trackedBotMessages?.length || 0) !== prevCount) {
-      await rtdbPatch('depBot/meta', {
-        trackedBotMessages: db.trackedBotMessages || []
-      });
-      lastSavedMetaHash = computeMetaHash();
+    // Prune trackedMessages older than 46 hours (Telegram refuses deletion after 48h anyway)
+    const trackedMap = await rtdbGet<Record<string, TrackedBotMessage>>('depBot/trackedMessages');
+    if (trackedMap && typeof trackedMap === 'object') {
+      const trackedPatch: Record<string, null> = {};
+      for (const [key, item] of Object.entries(trackedMap)) {
+        const exp = item?.expiresAt ?? (item?.sentAt || 0) + BOT_MESSAGE_TTL_MS;
+        if (
+          !item ||
+          now - (item.sentAt || 0) >= TRACKED_MESSAGE_MAX_AGE_MS ||
+          now - exp >= TRACKED_MESSAGE_MAX_AGE_MS
+        ) {
+          trackedPatch[key] = null;
+        }
+      }
+      if (Object.keys(trackedPatch).length > 0) {
+        await rtdbPatch('depBot/trackedMessages', trackedPatch);
+      }
     }
+    pruneTrackedMessagesInMemory(now, 400);
   } catch (err: any) {
     console.warn('[Archive Prune] Skipped:', err?.message || err);
   }
@@ -1033,24 +1134,37 @@ export function getOrCreatePlayer(
 }
 
 export function refreshTrackedBotMessage(chatId: string, messageId: string, ttlMs: number = BOT_MESSAGE_TTL_MS): void {
-  if (!messageId || !db.trackedBotMessages) return;
+  if (!messageId || chatId.startsWith('sim-') || !db.trackedBotMessages) return;
   const entry = db.trackedBotMessages.find((m) => m.chatId === chatId && m.messageId === messageId);
   if (entry) {
     entry.expiresAt = Date.now() + ttlMs;
+    const key = trackedMsgKey(chatId, messageId);
+    dirtyTrackedKeys.add(key);
+    deletedTrackedKeys.delete(key);
+    scheduleSave();
   }
 }
 
 export function trackBotMessage(chatId: string, messageId: string, ttlMs: number = BOT_MESSAGE_TTL_MS): void {
-  if (!messageId) return;
+  if (!messageId || chatId.startsWith('sim-')) return;
   if (!db.trackedBotMessages) db.trackedBotMessages = [];
   const now = Date.now();
-  db.trackedBotMessages.push({
-    chatId,
-    messageId,
-    sentAt: now,
-    expiresAt: now + ttlMs
-  });
-  pruneTrackedMessagesInMemory(now, 250);
+  const existing = db.trackedBotMessages.find((m) => m.chatId === chatId && m.messageId === messageId);
+  if (existing) {
+    existing.sentAt = now;
+    existing.expiresAt = now + ttlMs;
+  } else {
+    db.trackedBotMessages.push({
+      chatId,
+      messageId,
+      sentAt: now,
+      expiresAt: now + ttlMs
+    });
+  }
+  const key = trackedMsgKey(chatId, messageId);
+  dirtyTrackedKeys.add(key);
+  deletedTrackedKeys.delete(key);
+  pruneTrackedMessagesInMemory(now, 400);
   scheduleSave();
 }
 
@@ -1060,6 +1174,9 @@ export function untrackBotMessage(chatId: string, messageId: string): void {
   db.trackedBotMessages = db.trackedBotMessages.filter(
     (m) => !(m.chatId === chatId && m.messageId === messageId)
   );
+  const key = trackedMsgKey(chatId, messageId);
+  deletedTrackedKeys.add(key);
+  dirtyTrackedKeys.delete(key);
   if (db.trackedBotMessages.length !== prevLen) {
     scheduleSave();
   }

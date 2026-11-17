@@ -187,11 +187,15 @@ export function createTelegramTransport(bot: Bot): BotTransport {
     },
     async deleteMessage(chatId: string, messageId: string): Promise<void> {
       if (!messageId) return;
-      untrackBotMessage(chatId, messageId);
       try {
         await bot.api.deleteMessage(Number(chatId), Number(messageId));
-      } catch {
-        // Message already deleted or cannot be deleted
+        untrackBotMessage(chatId, messageId);
+      } catch (err: any) {
+        if (getRetryAfterMs(err) !== null) {
+          // Keep tracked if temporarily rate-limited so next pass retries deletion
+          return;
+        }
+        untrackBotMessage(chatId, messageId);
       }
     },
     async answerCallback(callbackId: string, text?: string, showAlert?: boolean): Promise<void> {
@@ -608,7 +612,8 @@ async function cleanupExpiredTelegramMessages(onlyChatId?: string) {
 
   cleanupInProgress = true;
   try {
-    const batch = expired.slice(0, onlyChatId ? 8 : 20);
+    const batch = expired.slice(0, onlyChatId ? 30 : 60);
+    const toDelete: typeof batch = [];
     for (const entry of batch) {
       if (entry.chatId.startsWith('sim-')) {
         untrackBotMessage(entry.chatId, entry.messageId);
@@ -618,12 +623,23 @@ async function cleanupExpiredTelegramMessages(onlyChatId?: string) {
         refreshTrackedBotMessage(entry.chatId, entry.messageId, 120_000);
         continue;
       }
-      try {
-        await tgTransport.deleteMessage?.(entry.chatId, entry.messageId);
-      } catch {
-        // Message already deleted, older than 48h, or bot lacks delete rights in this chat
-      } finally {
-        untrackBotMessage(entry.chatId, entry.messageId);
+      toDelete.push(entry);
+    }
+
+    const CHUNK = 5;
+    for (let i = 0; i < toDelete.length; i += CHUNK) {
+      const slice = toDelete.slice(i, i + CHUNK);
+      await Promise.allSettled(
+        slice.map(async (entry) => {
+          if (tgTransport.deleteMessage) {
+            await tgTransport.deleteMessage(entry.chatId, entry.messageId);
+          } else {
+            untrackBotMessage(entry.chatId, entry.messageId);
+          }
+        })
+      );
+      if (i + CHUNK < toDelete.length) {
+        await sleep(150);
       }
     }
   } finally {
@@ -778,14 +794,14 @@ async function runScheduledBroadcastsForSingleChat(
  */
 export async function runScheduledTasksForChat(chatId: string): Promise<string[]> {
   if (!chatId || chatId.startsWith('sim-')) return [];
+  await cleanupExpiredTelegramMessages(chatId);
+
   const now = Date.now();
   const prevCheck = lastLazyScheduleCheckByChat.get(chatId) || 0;
   if (now - prevCheck < LAZY_CHAT_SCHEDULE_COOLDOWN_MS) {
     return [];
   }
   lastLazyScheduleCheckByChat.set(chatId, now);
-
-  await cleanupExpiredTelegramMessages(chatId);
 
   const tgTransport = getActiveTelegramTransport();
   if (!tgTransport) return [];

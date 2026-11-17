@@ -2,11 +2,8 @@ name: Scheduled Bot Broadcasts
 
 on:
   schedule:
-    # Daytime & evening ticks (07:00..18:30 UTC = 10:00..21:30 Europe/Minsk) for Blitz, 12:00/12:01, and 21:00 Evening Report
-    - cron: '*/30 7-18 * * *'
-    # Exact 20:55 Europe/Minsk (17:55 UTC) Daily Lottery Draw + 21:00 Evening Report trigger
-    - cron: '55 17 * * *'
-    - cron: '0 18 * * *'
+    # Run every 5 minutes 24/7 to clean up expired bot messages and trigger 10:00-21:00 scheduled broadcasts
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 concurrency:
